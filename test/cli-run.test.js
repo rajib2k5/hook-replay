@@ -95,3 +95,23 @@ test('--dry-run says when --limit truncated the point set', () => {
   assert.deepEqual([json.hooks[0].truncated, json.hooks[0].points, json.hooks[0].matched], [true, 3, 23]);
   assert.doesNotMatch(cli([...denyRm, '--dry-run']).stdout, /truncated/);
 });
+
+const sandboxed = (args) => spawnSync(process.execPath, [path.join(root, 'bin/hook-replay.js'), '--projects-dir', projects,
+  '--session', 'cccccccc-0000-4000-8000-000000000003', '--hook', 'true', '--event', 'PreToolUse', '--json', ...args], { encoding: 'utf8', cwd: root });
+const noBwrap = spawnSync('bwrap', ['--version']).error ? 'bwrap is not installed' : false;
+
+test('the filesystem is read-only by default; --writable-fs opts out with a warning; --readonly-fs is a deprecated no-op', { skip: noBwrap }, () => {
+  const def = sandboxed([]);
+  assert.equal(def.status, 0, def.stderr);
+  assert.equal(JSON.parse(def.stdout).isolation.readonly_fs, true);
+  assert.doesNotMatch(def.stderr, /WARNING/);
+  const rw = sandboxed(['--writable-fs']);
+  assert.equal(rw.status, 0, rw.stderr);
+  assert.equal(JSON.parse(rw.stdout).isolation.readonly_fs, false);
+  assert.match(rw.stderr, /WARNING: --writable-fs: hooks can write anywhere you can/);
+  assert.ok(JSON.parse(rw.stdout).warnings.some(w => /--writable-fs/.test(w)));
+  const old = sandboxed(['--readonly-fs']);
+  assert.equal(old.status, 0, old.stderr);
+  assert.equal(JSON.parse(old.stdout).isolation.readonly_fs, true);
+  assert.match(old.stderr, /--readonly-fs is deprecated/);
+});

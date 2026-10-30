@@ -95,22 +95,27 @@ test('seccomp: an unsupported architecture has no program, and isolation is refu
   await assert.rejects(chooseIsolation({ tmp: tmpDir(t), arch: 'riscv64' }), (e) => e instanceof IsolationError && /riscv64/.test(e.message));
 });
 
-test('wrapperArgv: bwrap with every namespace, a new session and the seccomp fd; null wrapper is the bare argv', () => {
+test('wrapperArgv: read-only root by default, --writable-fs binds / writable; both get a fresh /dev and hide /run/user/<uid>', () => {
   const ns = ['--unshare-all', '--new-session', '--die-with-parent', '--seccomp', '3', '--'];
-  assert.deepEqual(wrapperArgv('bwrap', ['sh', '-c', 'x'], {}), ['bwrap', '--dev-bind', '/', '/', '--proc', '/proc', ...ns, 'sh', '-c', 'x']);
-  assert.deepEqual(wrapperArgv('bwrap', ['true'], { readonlyFs: true, tmp: '/t/x', binds: ['/tmp/h.sh'] }),
-    ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--ro-bind', '/tmp/h.sh', '/tmp/h.sh',
+  const run = ['--tmpfs', '/run/user/1000'];
+  assert.deepEqual(wrapperArgv('bwrap', ['true'], { tmp: '/t/x', binds: ['/tmp/h.sh'], runUser: '/run/user/1000' }),
+    ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', ...run, '--ro-bind', '/tmp/h.sh', '/tmp/h.sh',
       '--bind', '/t/x', '/t/x', ...ns, 'true']);
+  assert.deepEqual(wrapperArgv('bwrap', ['sh', '-c', 'x'], { writableFs: true, tmp: '/t/x', runUser: '/run/user/1000' }),
+    ['bwrap', '--bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...run, '--bind', '/t/x', '/t/x', ...ns, 'sh', '-c', 'x']);
+  assert.deepEqual(wrapperArgv('bwrap', ['true'], { tmp: '/t/x', runUser: null }),
+    ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--bind', '/t/x', '/t/x', ...ns, 'true']);
   assert.deepEqual(wrapperArgv(null, ['true'], {}), ['true']);
 });
 
-test('hookBinds: existing files under /tmp named by the command are bound; other paths are not', (t) => {
+test('hookBinds: existing files under a hidden dir (/tmp, /run/user/<uid>) named by the command are bound; other paths are not', (t) => {
   const d = tmpDir(t);
   const f = path.join(d, 'hook.sh');
   fs.writeFileSync(f, 'exit 0\n');
   assert.deepEqual(hookBinds(['sh', '-c', `sh ${f} --flag`]), [f]);
   assert.deepEqual(hookBinds(['node', f, '/usr/bin/env', path.join(d, 'missing')]), [f]);
   assert.deepEqual(hookBinds(['sh', '-c', 'echo /etc/passwd']), []);
+  assert.deepEqual(hookBinds(['sh', f], ['/run/user/1000']), []);
 });
 
 test('probe fails when the bwrap binary does not exist', async (t) => {
@@ -225,29 +230,74 @@ test('(f) bwrap: a daemonising hook leaves no process behind after its timeout',
   assert.equal(await waitGone(`sleep ${marker}`), true, `a 'sleep ${marker}' survived`);
 });
 
-test('--readonly-fs: the hook cannot write outside the temp dir (bwrap)', { skip }, async (t) => {
-  const d = fs.mkdtempSync(path.join(root, '.hook-replay-rotest-'));
+// Read-only filesystem is the default (round 3): a hook cannot plant code that runs later outside the sandbox.
+// A directory the test owns, visible inside the sandbox (not under /tmp, which the sandbox replaces with a tmpfs).
+const visibleDir = (t) => {
+  const base = path.resolve(root).startsWith('/tmp/') ? os.homedir() : root;
+  const d = fs.mkdtempSync(path.join(base, '.hook-replay-rotest-'));
   t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  return d;
+};
+const uid = process.getuid();
+
+test('default: the hook can read but not write a directory outside the temp root; --writable-fs can', { skip }, async (t) => {
+  const d = visibleDir(t);
   const target = path.join(d, 'written');
-  const ro = await runOne({ hook: `touch ${target}` }, { readonlyFs: true });
+  const ro = await runOne({ hook: `test -d ${d} && touch ${target}; echo $?` });
   assert.equal(ro.isolation.readonly_fs, true);
-  assert.notEqual(ro.results[0].run.exitCode, 0);
+  assert.notEqual(ro.results[0].run.stdout.trim(), '0');
   assert.equal(fs.existsSync(target), false);
-  // Control: without --readonly-fs the same hook does write.
-  await runOne({ hook: `touch ${target}` });
-  assert.equal(fs.existsSync(target), true);
+  const rw = await runOne({ hook: `touch ${target}` }, { writableFs: true });
+  assert.equal(rw.isolation.readonly_fs, false);
+  assert.equal(fs.existsSync(target), true, 'control: --writable-fs writes');
 });
 
-test('--readonly-fs: a hook script stored under /tmp still runs (its path is bound read-only)', { skip }, async (t) => {
+test("default and --writable-fs: no host /dev/pts terminal can be opened for writing", { skip }, async () => {
+  const host = fs.readdirSync('/dev/pts').filter(n => /^\d+$/.test(n));
+  // ": >" opens for writing and writes nothing, so a broken sandbox never prints on a real terminal. The subshell
+  // keeps a failed redirection from ending sh.
+  const cmd = ['0', ...host].map(n => `( : > /dev/pts/${n} ) 2>/dev/null && echo open ${n}`).join('; ') + '; true';
+  for (const extra of [{}, { writableFs: true }]) {
+    const res = await runOne({ hook: cmd }, extra);
+    assert.equal(res.results[0].run.stdout, '', JSON.stringify(extra));
+  }
+});
+
+test('default and --writable-fs: /run/user/<uid> (D-Bus, ...) is an empty tmpfs', { skip: skip || (!fs.existsSync(`/run/user/${uid}`) && 'no /run/user/<uid>') }, async () => {
+  const cmd = `ls -A /run/user/${uid} | wc -l; test -e /run/user/${uid}/bus && echo bus visible; true`;
+  for (const extra of [{}, { writableFs: true }]) {
+    const res = await runOne({ hook: cmd }, extra);
+    assert.equal(res.results[0].run.stdout.trim(), '0', JSON.stringify(extra));
+  }
+});
+
+test('default: a host FIFO in a sibling of the temp root cannot be written; --writable-fs control can', { skip }, async (t) => {
+  const d = fs.mkdtempSync('/tmp/hr-fifo-');
+  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  const fifo = path.join(d, 'f.fifo');
+  assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
+  const fd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+  t.after(() => fs.closeSync(fd));
+  const read = () => { try { const b = Buffer.alloc(64); return b.subarray(0, fs.readSync(fd, b)).toString(); } catch (e) { return e.code; } };
+  const hook = `echo pwned > ${fifo}`;
+  const ro = await runOne({ hook, hookTimeout: '2' });
+  assert.notEqual(ro.results[0].run.exitCode, 0);
+  assert.ok(!String(read()).includes('pwned'), 'the hook reached the FIFO');
+  await runOne({ hook, hookTimeout: '2' }, { writableFs: true });
+  assert.equal(read(), 'pwned\n', 'control: --writable-fs reaches the FIFO');
+});
+
+test('default: a hook script stored under /tmp still runs (its path is bound read-only)', { skip }, async (t) => {
   const d = tmpDir(t);
   const script = path.join(d, 'hook.sh');
   fs.writeFileSync(script, 'cat >/dev/null\necho ran\n');
-  const res = await runOne({ hook: `sh ${script}` }, { readonlyFs: true });
+  const res = await runOne({ hook: `sh ${script}` });
   assert.deepEqual([res.results[0].run.exitCode, res.results[0].run.stdout], [0, 'ran\n']);
 });
 
-test('--readonly-fs with --allow-network is refused', async (t) => {
-  await assert.rejects(chooseIsolation({ allowNetwork: true, readonlyFs: true, tmp: tmpDir(t) }), IsolationError);
+test('--allow-network: unwrapped, so the filesystem is not read-only', async (t) => {
+  const iso = await chooseIsolation({ allowNetwork: true, tmp: tmpDir(t) });
+  assert.equal(iso.readonly_fs, false);
 });
 
 test('sandbox overhead is measured and reported as p50/p95 ms', { skip }, async () => {

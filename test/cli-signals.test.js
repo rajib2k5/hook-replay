@@ -27,16 +27,17 @@ for (const [sig, code, allowNetwork] of cases) {
     const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-sig-'));
     const marker = `303.${process.pid}${Math.floor(Math.random() * 1e6)}`;
     t.after(() => { spawnSync('pkill', ['-f', `sleep ${marker}`]); fs.rmSync(d, { recursive: true, force: true }); });
-    const started = path.join(d, 'started');
     const tmpdir = path.join(d, 'tmpdir');
     fs.mkdirSync(tmpdir);
-    // The hook backgrounds one sleep (stays in its process group) and then hangs in another.
-    const hook = `touch ${started}; sleep ${marker} & sleep ${marker}`;
+    // The hook marks that it started in the temp root (the one place a sandboxed hook can write: the filesystem is
+    // read-only by default), backgrounds one sleep (stays in its process group) and then hangs in another.
+    const started = () => fs.readdirSync(tmpdir).some(n => n.startsWith('hook-replay-') && fs.existsSync(path.join(tmpdir, n, 'plugin-data', 'started')));
+    const hook = `touch "$CLAUDE_PLUGIN_DATA/started"; sleep ${marker} & sleep ${marker}`;
     const child = spawn(process.execPath, [path.join(root, 'bin/hook-replay.js'), '--projects-dir', projects, '--session', 'cccccccc-0000-4000-8000-000000000003',
       '--hook', hook, '--event', 'PreToolUse', '--timeout', '60', ...(allowNetwork ? ['--allow-network'] : [])],
     { env: { ...process.env, TMPDIR: tmpdir }, stdio: ['ignore', 'pipe', 'pipe'] });
     const exited = new Promise(r => child.on('exit', (c, s) => r({ c, s })));
-    assert.ok(await until(() => fs.existsSync(started)), 'hook started');
+    assert.ok(await until(started), 'hook started');
     assert.equal(fs.readdirSync(tmpdir).filter(n => n.startsWith('hook-replay-')).length, 1, 'temp root exists while running');
     child.kill(sig);
     const { c, s } = await exited;

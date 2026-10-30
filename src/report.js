@@ -121,7 +121,7 @@ const fmt = (x) => x === null ? '-' : String(x);
 export function renderHuman(m) {
   const out = [];
   out.push(`hook-replay ${m.tool_version}  points ${Object.values(m.corpus.points_by_event).reduce((a, b) => a + b, 0)}  sessions ${m.corpus.sessions}` +
-    `  isolation ${m.isolation.network}${m.isolation.readonly_fs ? ' (readonly fs)' : ''}  cwd ${m.config.cwd_mode}` +
+    `  isolation ${m.isolation.network}${m.isolation.network === 'bwrap' ? (m.isolation.readonly_fs ? ' (read-only fs)' : ' (WRITABLE fs)') : ''}  cwd ${m.config.cwd_mode}` +
     `  redaction ${m.redacted ? 'on' : 'OFF'}  project-dir ${m.config.project_dir}`);
   for (const w of m.warnings) out.push(`warning: ${w}`);
   out.push('');

@@ -22,7 +22,7 @@ export const OPTIONS = {
   'project-dir': { type: 'string' }, 'plugin-root': { type: 'string' },
   timeout: { type: 'string' }, concurrency: { type: 'string' }, cwd: { type: 'string' },
   env: { type: 'string', multiple: true },
-  'allow-network': { type: 'boolean' }, 'readonly-fs': { type: 'boolean' },
+  'allow-network': { type: 'boolean' }, 'writable-fs': { type: 'boolean' }, 'readonly-fs': { type: 'boolean' },
   'no-subagents': { type: 'boolean' },
   project: { type: 'string', multiple: true }, session: { type: 'string' },
   since: { type: 'string' }, until: { type: 'string' }, sample: { type: 'string' }, limit: { type: 'string' },
@@ -66,7 +66,8 @@ Execution:
   --concurrency <n>       transcripts run in parallel (default 4)
   --cwd <mode>            temp (default) or recorded: the hook's working directory
   --env <NAME>            pass this environment variable to hooks (repeatable)
-  --readonly-fs           also make the filesystem read-only for hooks, except the temp dir (needs bwrap)
+  --writable-fs           let hooks write anywhere you can (default: read-only filesystem except the temp dir)
+  --readonly-fs           deprecated, no effect: read-only is the default
   --allow-network         run hooks WITHOUT the sandbox (no isolation at all); report says NOT ISOLATED
   --dry-run               count what would run, run nothing
 
@@ -82,6 +83,8 @@ Output:
 
 Exit codes: 0 report, 1 internal error, 2 usage, 3 no isolation (see --allow-network), 4 --fail-on matched,
 130/143/129 stopped by SIGINT/SIGTERM/SIGHUP.`;
+
+const WRITABLE_WARNING = '--writable-fs: hooks can write anywhere you can, N times, including files such as ~/.claude/settings.json or ~/.bashrc that run later outside the sandbox';
 
 const posInt = (v, name, dflt) => {
   if (v === undefined) return dflt;
@@ -118,7 +121,7 @@ export function parseCli(argv) {
     timeoutS: v.timeout === undefined ? DEFAULT_TIMEOUT_S : Number(v.timeout),
     cwdMode: v.cwd ?? 'temp',
     envNames: v.env ?? [],
-    allowNetwork: !!v['allow-network'], readonlyFs: !!v['readonly-fs'],
+    allowNetwork: !!v['allow-network'], writableFs: !!v['writable-fs'], readonlyFsAlias: !!v['readonly-fs'],
     projectDir: path.resolve(v['project-dir'] ?? process.cwd()),
     pluginRoot: v['plugin-root'] === undefined ? undefined : path.resolve(v['plugin-root']),
     showRaw: !!v['show-raw'],
@@ -189,6 +192,8 @@ async function run(argv, io, setRedactor) {
     return 0;
   }
   if (opts.showRaw) io.stderr.write('hook-replay: WARNING: --show-raw: redaction OFF, the report contains raw transcript text\n');
+  if (opts.readonlyFsAlias) io.stderr.write('hook-replay: note: --readonly-fs is deprecated and has no effect: the filesystem is read-only by default\n');
+  if (opts.writableFs && !opts.allowNetwork) io.stderr.write(`hook-replay: WARNING: ${WRITABLE_WARNING}\n`);
   let res;
   try {
     res = await replay({ ...opts, stderr: io.stderr, redact: red });
@@ -200,6 +205,7 @@ async function run(argv, io, setRedactor) {
   if (opts.hooks.some(h => h.ifIgnored)) warnings.push('--ignore-if: hooks with an if field ran on every matcher hit, so their counts are an upper bound');
   if (opts.showRaw) warnings.push('redaction OFF (--show-raw): this report contains raw transcript text');
   if (res.corpus.files_unreadable) warnings.push(`${res.corpus.files_unreadable} transcript file(s) could not be read and were skipped`);
+  if (opts.writableFs && res.isolation.wrapper) warnings.push(WRITABLE_WARNING);
   if (res.isolation.network === 'NOT ISOLATED') warnings.push('NOT ISOLATED (--allow-network): hooks ran unwrapped and could reach the network, Unix sockets and other processes');
   const model = buildReport({
     res, hooks: opts.hooks, samples: opts.samples, warnings, version: VERSION, redacted: !opts.showRaw,

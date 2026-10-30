@@ -19,20 +19,36 @@ export function seccompFilter(arch = process.arch) {
   return p ? encode(p) : null;
 }
 
-export function wrapperArgv(kind, argv, { readonlyFs = false, tmp, binary, binds = [] } = {}) {
+// /run/user/<uid> (D-Bus, pulse, gpg-agent, systemd --user sockets) if it exists; it is hidden in every mode.
+export function runUserDir(uid = process.getuid?.()) {
+  if (uid === undefined) return null;
+  const d = `/run/user/${uid}`;
+  try { return fs.statSync(d).isDirectory() ? d : null; } catch { return null; }
+}
+
+// Default (read-only): the host root read-only, a fresh /dev (no host /dev/pts terminals, a private /dev/shm),
+// a tmpfs on /tmp (host FIFOs and sockets there are gone) and on /run/user/<uid>, only the temp root writable. So a
+// hook cannot rewrite ~/.claude/settings.json or ~/.bashrc for something outside the sandbox to run later.
+// --writable-fs binds the root writable but keeps the fresh /dev and the hidden /run/user/<uid>.
+export function wrapperArgv(kind, argv, { writableFs = false, tmp, binary, binds = [], runUser = runUserDir() } = {}) {
   if (kind !== 'bwrap') return argv;
-  const fsArgs = readonlyFs
-    ? ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', ...binds.flatMap(b => ['--ro-bind', b, b]), '--bind', tmp, tmp]
-    : ['--dev-bind', '/', '/', '--proc', '/proc'];
+  const fsArgs = [...(writableFs ? ['--bind', '/', '/'] : ['--ro-bind', '/', '/']), '--dev', '/dev', '--proc', '/proc',
+    ...(writableFs ? [] : ['--tmpfs', '/tmp']), ...(runUser ? ['--tmpfs', runUser] : []),
+    ...binds.flatMap(b => ['--ro-bind', b, b]), '--bind', tmp, tmp];
   return [binary ?? 'bwrap', ...fsArgs, '--unshare-all', '--new-session', '--die-with-parent', '--seccomp', String(SECCOMP_FD), '--', ...argv];
 }
 
-// Files under /tmp that the hook command names. --readonly-fs puts a tmpfs on /tmp, so these are bound back
-// read-only; files next to them are not.
-export function hookBinds(argv) {
+// The directories the sandbox replaces with an empty tmpfs: /tmp (not with --writable-fs) and /run/user/<uid>.
+export function hiddenDirs({ writableFs = false, runUser = runUserDir() } = {}) {
+  return [...(writableFs ? [] : ['/tmp']), ...(runUser ? [runUser] : [])];
+}
+
+// Files under a hidden dir that the hook command names (a hook script kept in /tmp), bound back read-only so they
+// still run; files next to them are not visible.
+export function hookBinds(argv, hidden = ['/tmp']) {
   const out = [];
   for (const tok of argv.flatMap(a => a.split(/\s+/)).map(s => s.replace(/^['"]+|['"]+$/g, ''))) {
-    if (!tok.startsWith('/tmp/') || out.includes(tok)) continue;
+    if (!hidden.some(d => tok.startsWith(d + '/')) || out.includes(tok)) continue;
     try { if (fs.statSync(tok).isFile()) out.push(tok); } catch { /* not a file */ }
   }
   return out;
@@ -67,8 +83,8 @@ const listenOn = (...args) => new Promise((resolve, reject) => {
 // namespace, which a different socket defeats. (3) No listener may see a connection. (4) Positive control: the
 // same client run unwrapped must connect to every listener, so the listeners were reachable to begin with.
 // `wrap` builds the wrapped argv and `control` the unwrapped one (tests inject broken ones).
-export async function probe({ tmp, readonlyFs = false, binary, filter = seccompFilter(), wrap, control = (argv) => argv } = {}) {
-  const w = wrap ?? ((argv) => wrapperArgv('bwrap', argv, { readonlyFs, tmp, binary }));
+export async function probe({ tmp, writableFs = false, binary, filter = seccompFilter(), wrap, control = (argv) => argv } = {}) {
+  const w = wrap ?? ((argv) => wrapperArgv('bwrap', argv, { writableFs, tmp, binary }));
   const extraInput = filter ? [filter] : [];
   const run = (argv, input = extraInput) => runHook({ argv, stdin: '', env: { PATH: process.env.PATH }, cwd: tmp, timeoutMs: 10000,
     timeoutSource: 'replay_cap', extraInput: input });
@@ -115,17 +131,16 @@ function which(cmd) {
   return cmd;
 }
 
-export async function chooseIsolation({ allowNetwork = false, readonlyFs = false, tmp, binary = 'bwrap', arch = process.arch, platform = process.platform }) {
-  if (allowNetwork && readonlyFs) throw new IsolationError('--readonly-fs needs the sandbox, and --allow-network runs without it; drop one');
+export async function chooseIsolation({ allowNetwork = false, writableFs = false, tmp, binary = 'bwrap', arch = process.arch, platform = process.platform }) {
   if (allowNetwork) return { network: 'NOT ISOLATED', wrapper: null, readonly_fs: false, probe: 'not probed (--allow-network)', filter: null };
   const unavailable = (why) => new IsolationError(`no isolation available (${why}); pass --allow-network to run without it`);
   if (platform !== 'linux') throw unavailable(`isolation needs Linux bwrap, this is ${platform}`);
   const filter = seccompFilter(arch);
   if (!filter) throw unavailable(`no seccomp program for architecture ${arch}`);
   const bin = which(binary);
-  const r = await probe({ tmp, readonlyFs, binary: bin, filter });
+  const r = await probe({ tmp, writableFs, binary: bin, filter });
   if (!r.ok) throw unavailable(r.reason);
-  return { network: 'bwrap', wrapper: 'bwrap', binary: bin, readonly_fs: readonlyFs, probe: r.reason, filter };
+  return { network: 'bwrap', wrapper: 'bwrap', binary: bin, readonly_fs: !writableFs, probe: r.reason, filter };
 }
 
 // Latency of `true`, 20 runs unwrapped and 20 wrapped, reported as two distributions. Differences of percentiles
@@ -144,6 +159,6 @@ export async function measureOverhead(isolation, { tmp, runs = 20, time } = {}) 
   const round = (x) => Math.round(x * 100) / 100;
   const summary = (xs) => ({ p50: round(percentile(xs, 0.5)), p95: round(percentile(xs, 0.95)) });
   const unwrapped = summary(await timeRuns(['true'], []));
-  const wrapped = summary(await timeRuns(wrapperArgv(isolation.wrapper, ['true'], { readonlyFs: isolation.readonly_fs, tmp, binary: isolation.binary }), [isolation.filter]));
+  const wrapped = summary(await timeRuns(wrapperArgv(isolation.wrapper, ['true'], { writableFs: !isolation.readonly_fs, tmp, binary: isolation.binary }), [isolation.filter]));
   return { wrapped, unwrapped };
 }
