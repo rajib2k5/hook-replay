@@ -19,7 +19,7 @@ const rules = [
   ['4 slack token', 'xoxb-0000000000-fakefakefake', '[REDACTED:slack_token]'],
   ['4 google key', 'AIzaFAKEfakeFAKEfakeFAKEfakeFAKEfake123', '[REDACTED:google_key]'],
   ['5 jwt', 'eyJmYWtlaGVhZGVy.eyJmYWtlcGF5bG9hZA.ZmFrZXNpZ25hdHVyZQ', '[REDACTED:jwt]'],
-  ['6 bearer', 'curl -H "Bearer fakeValue0000"', 'curl -H "Bearer [REDACTED:token]'],
+  ['6 bearer', 'curl -H "Bearer fakeValue0000"', 'curl -H "Bearer [REDACTED:token]"'],
   ['6 authorization', 'Authorization: fakeValue0000 rest', 'Authorization: [REDACTED:token] rest'],
   ['6 authorization: bearer', 'Authorization: Bearer fakeValue0000 rest', 'Authorization: Bearer [REDACTED:token] rest'],
   ['7 name=value', 'export DB_PASSWORD="fake pass" next', 'export DB_PASSWORD=[REDACTED:value] next'],
@@ -68,7 +68,7 @@ const gaps = [
   ['flag --secret X', "cli --secret 'sec flag 0046'", 'cli --secret [REDACTED:value]'],
   ['mysql -pXXXX', 'mysql -u root -pMyPw0047 db', 'mysql -u root -p[REDACTED:value] db'],
   ['mariadb-dump -pXXXX', 'mariadb-dump -pAnotherPw48 db', 'mariadb-dump -p[REDACTED:value] db'],
-  ['header X-Api-Key', 'curl -H "X-Api-Key: xak-header-0049"', 'curl -H "X-Api-Key: [REDACTED:value]'],
+  ['header X-Api-Key', 'curl -H "X-Api-Key: xak-header-0049"', 'curl -H "X-Api-Key: [REDACTED:value]"'],
   ['header Api-Key', 'Api-Key: ak-header-0050 rest', 'Api-Key: [REDACTED:value] rest'],
   ['stripe sk_live', 'STRIPE sk_live_51FakeLiveKey0051abcdEF', 'STRIPE [REDACTED:api_key]'],
   ['stripe sk_test', 'sk_test_51FakeTestKey0052abcdEF', '[REDACTED:api_key]'],
@@ -201,3 +201,45 @@ const keeps4 = [
   '- name: PASSWORD_MIN_LENGTH\n  value: 8',
 ];
 for (const input of keeps4) test(`round 4 keep: ${JSON.stringify(input).slice(0, 60)}`, () => assert.equal(R(input), input));
+
+// Round-5 review leaks (red4.mjs; each value fresh and fake, used nowhere else). The value must be gone.
+const leaks5 = [
+  ['YAML block scalar under a secret key', 'db:\n  password: |\n    r5YamlBlk5501\n    r5YamlBlk5502\n  user: x', 'r5YamlBlk5501|r5YamlBlk5502'],
+  ['YAML folded scalar under a secret key', 'api_key: >-\n  r5YamlFold5503\nnext: 1', 'r5YamlFold5503'],
+  ['aws configure set', 'aws configure set aws_secret_access_key r5AwsCfg5504 --profile p', 'r5AwsCfg5504'],
+  ['PGP private key block', '-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBr5Pgp5505\n-----END PGP PRIVATE KEY BLOCK-----', 'r5Pgp5505'],
+  ['Slack webhook URL', 'curl -X POST https://hooks.slack.com/services/T0R5H00K/B0R5H00K/r5SlackHook5506 -d x', 'r5SlackHook5506|B0R5H00K'],
+  ['.pgpass line', 'echo "db.invalid:5432:*:bob:r5PgPass5507" > ~/.pgpass', 'r5PgPass5507'],
+  ['.pgpass line, port *', 'localhost:*:app:u:r5PgPass5508', 'r5PgPass5508'],
+  ['htpasswd -b', 'htpasswd -b /etc/h bob r5Htpw5509', 'r5Htpw5509'],
+  ['htpasswd -cb', 'htpasswd -cb .htpasswd bob r5Htpw5510', 'r5Htpw5510'],
+  ['htpasswd -nb (no file)', 'htpasswd -nb bob r5Htpw5511', 'r5Htpw5511'],
+  ['--pw x', 'tool login --pw r5PwFlag5512 --user u', 'r5PwFlag5512'],
+  ['{"auth": ...}', '{"auths":{"reg.invalid":{"auth": "r5AuthVal5513"}}}', 'r5AuthVal5513'],
+  ['auth=("u","pw")', 'requests.get(u, auth=("bob", "r5PyAuth5514"))', 'r5PyAuth5514'],
+  ['; as a URL-parameter separator', 'https://h.invalid/cb?a=1;token=r5Semi5515;b=2', 'r5Semi5515'],
+];
+for (const [name, input, values] of leaks5) {
+  test(`round 5 leak: ${name}`, () => {
+    const out = R(input);
+    for (const v of values.split('|')) assert.ok(!out.includes(v), `${v} survives in ${out}`);
+    assert.match(out, /\[REDACTED:/);
+  });
+}
+
+// Round-5 over-redaction: a value redacted in a quoted context keeps the closing quote and what follows.
+const exact5 = [
+  ['X-Api-Key in a quoted header', 'curl -H "X-Api-Key: r5Hdr5516" -H "Accept: x" u', 'curl -H "X-Api-Key: [REDACTED:value]" -H "Accept: x" u'],
+  ['X-Api-Key inside a JSON string', '{"h":"X-Api-Key: r5Hdr5517","n":1}', '{"h":"X-Api-Key: [REDACTED:value]","n":1}'],
+  ['X-Api-Key escaped inside a string', '{\\"h\\":\\"X-Api-Key: r5Hdr5518\\"}', '{\\"h\\":\\"X-Api-Key: [REDACTED:value]\\"}'],
+  ['Bearer at the end of an argv array', '["curl","-H","Authorization: Bearer r5Bear5519"]', '["curl","-H","Authorization: Bearer [REDACTED:token]"]'],
+  ['bare Bearer in an argv array', '["Bearer r5Bear5520", "x"]', '["Bearer [REDACTED:token]", "x"]'],
+  ['a quote inside a value is still part of it', 'PASSWORD=r5ab"cd5521 next', 'PASSWORD=[REDACTED:value] next'],
+  ['YAML block: the rest of the document stays', 'a: 1\nsecret: |\n  r5Blk5522\nb: 2', 'a: 1\nsecret: [REDACTED:value]\nb: 2'],
+];
+for (const [name, input, want] of exact5) test(`round 5 exact: ${name}`, () => assert.equal(R(input), want));
+
+// Documented limit: a secret in prose, with no name=value, flag or key shape, is not found.
+test('round 5 limit (documented): "password hunter2" in prose is not redacted', () => {
+  assert.equal(R('blocked: command contains password r5Prose5523'), 'blocked: command contains password r5Prose5523');
+});

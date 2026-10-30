@@ -218,3 +218,43 @@ process.stderr.write = (...a) => { if (armed) { armed = false; const e = new Err
   assert.match(dbg.stderr, /\n    at /);
   for (const v of ['r3CrashKey8850', os.homedir()]) assert.ok(!dbg.stderr.includes(v), `debug stderr contains ${v}`);
 });
+
+// Round-5 review gaps (red4.mjs), end to end through the CLI in both renderings; fresh, fake values.
+const R5_SESSION = '55555555-0000-4000-8000-000000000005';
+const R5_TOOLS = [
+  ['Bash', { command: "cat > c.yaml <<'E'\ndb:\n  password: |\n    r5CliYaml6601\n  user: x\nE" }],
+  ['Bash', { command: "printf 'api_key: >-\\n  r5CliFold6602\\n' > k.yaml && cat <<'E' > d.yaml\ntoken: >\n  r5CliFold6612\nE" }],
+  ['Bash', { command: 'aws configure set aws_secret_access_key r5CliAws6603' }],
+  ['Bash', { command: "gpg --import <<'E'\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBr5CliPgp6604\n-----END PGP PRIVATE KEY BLOCK-----\nE" }],
+  ['Bash', { command: 'curl -X POST https://hooks.slack.com/services/T0R5CLI0/B0R5CLI0/r5CliSlack6605 -d x' }],
+  ['Bash', { command: 'echo "db.invalid:5432:*:bob:r5CliPgpass6606" > ~/.pgpass' }],
+  ['Bash', { command: 'htpasswd -b /etc/h bob r5CliHtpw6607' }],
+  ['Bash', { command: 'tool login --pw r5CliPw6608' }],
+  ['mcp__reg__login', { registry: 'reg.invalid', auth: 'r5CliAuth6609' }],
+  ['Bash', { command: `echo '{"auths":{"r":{"auth": "r5CliAuth6610"}}}' > ~/.docker/config.json && python -c 'requests.get(u, auth=("bob", "r5CliPyAuth6611"))'` }],
+];
+const R5_PLANTED = ['r5CliYaml6601', 'r5CliFold6602', 'r5CliFold6612', 'r5CliAws6603', 'r5CliPgp6604', 'r5CliSlack6605', 'r5CliPgpass6606', 'r5CliHtpw6607',
+  'r5CliPw6608', 'r5CliAuth6609', 'r5CliAuth6610', 'r5CliPyAuth6611'];
+
+for (const mode of ['table', 'json']) {
+  test(`(d) round 5, ${mode}: YAML block scalars, aws configure, PGP, Slack webhooks, .pgpass, htpasswd, --pw and auth values do not leak`, (t) => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-redact-'));
+    t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+    const dir = path.join(d, 'projects', '-srv-proj');
+    fs.mkdirSync(dir, { recursive: true });
+    const env = (type, uuid, message) => JSON.stringify({ parentUuid: null, isSidechain: false, cwd: '/srv/proj', sessionId: R5_SESSION,
+      type, message, uuid, timestamp: '2026-10-05T07:00:00.000Z' });
+    const lines = [env('user', 'r5-u', { role: 'user', content: 'go' })];
+    R5_TOOLS.forEach(([name, input], i) => {
+      lines.push(env('assistant', `r5-a-${i}`, { id: `msg_R5${i}`, role: 'assistant', content: [{ type: 'tool_use', id: `toolu_R5${i}`, name, input }], stop_reason: 'tool_use' }));
+      lines.push(env('user', `r5-r-${i}`, { role: 'user', content: [{ tool_use_id: `toolu_R5${i}`, type: 'tool_result', content: 'ok' }] }));
+    });
+    fs.writeFileSync(path.join(dir, `${R5_SESSION}.jsonl`), lines.join('\n') + '\n');
+    const flags = mode === 'json' ? ['--json'] : [];
+    const red = cli(d, flags, ANY_DENY);
+    assert.equal(red.status, 0, red.stderr);
+    for (const v of R5_PLANTED) assert.ok(!(red.stdout + red.stderr).includes(v), `redacted ${mode} output contains ${v}`);
+    const raw = cli(d, [...flags, '--show-raw'], ANY_DENY);
+    for (const v of R5_PLANTED) assert.ok(raw.stdout.includes(v), `--show-raw ${mode} output lacks ${v}`);
+  });
+}

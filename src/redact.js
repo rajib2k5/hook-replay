@@ -15,11 +15,14 @@ export function entropy(s) {
 // Rule 7's names, also with '-' (X-Api-Key, Api-Key) and with a closing quote before the separator ("api_key": ...).
 const NAMES = String.raw`SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|API[_-]?KEY|ACCESS[_-]KEY|PRIVATE[_-]KEY|ACCOUNT[_-]?KEY|SHARED[_-]?ACCESS[_-]?KEY`;
 const KEY_NAME = String.raw`\b([A-Z0-9_-]*(${NAMES})[A-Z0-9_-]*)(\\?["']?)`;
+// A bare word: non-space characters up to whitespace, except a closing quote (also \" or \') that ends the word, i.e.
+// is followed by whitespace, an escaped \n, , ; ) ] } or the end: "X-Api-Key: v" keeps its quote (round-5 review).
+const WORD = String.raw`(?:(?!\\?["'](?:[\s,;)\]}]|\\[nrt]|$))\S)+`;
 // A value: a number or boolean (kept by keepScalar unless the name ends in a secret word), a JSON string inside a
 // JSON string (\"...\", where an inner quote is \\\" and an inner backslash \\\\), a JSON string, a single-quoted
-// string, a flat [...] array or {...} object (every element goes, also inside a string), or a word that is not an
+// string, a flat [...] array or {...} object (every element goes, also inside a string), or a WORD that is not an
 // earlier rule's [REDACTED:...] marker.
-const VALUE = String.raw`(?!\\?["']?\[REDACTED:)(-?\d+(?:\.\d+)?(?![\w.:/-])|(?:true|false|null)(?![\w-])|\\"(?:[^"\\]|\\\\\\"|\\\\\\\\|\\\\[^"\\]|\\[^"\\])*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|\[[^\[\]\n]*\]|\{[^{}\n]*\}|(?!\[REDACTED:)\S+)`;
+const VALUE = String.raw`(?!\\?["']?\[REDACTED:)(-?\d+(?:\.\d+)?(?![\w.:/-])|(?:true|false|null)(?![\w-])|\\"(?:[^"\\]|\\\\\\"|\\\\\\\\|\\\\[^"\\]|\\[^"\\])*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|\[[^\[\]\n]*\]|\{[^{}\n]*\}|(?!\[REDACTED:)${WORD})`;
 // Key-context redaction keeps a number or boolean (max_tokens: 4096, PASSWORD_MIN_LENGTH=8,
 // TOKENIZERS_PARALLELISM=false); a number is still redacted when the name ends in a secret word (PASSWORD=1234).
 const SECRET_END = /(SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|KEY|PASS|PWD|AUTHORIZATION|COOKIE)\\?["']?$/i;
@@ -32,24 +35,28 @@ export function keepScalar(name, value) {
 }
 const keepOr = (m, name, value) => keepScalar(name, value) ? m : m.slice(0, m.length - value.length) + R('value');
 // Object keys whose whole value is redacted (report.js redactDeep): rule 7's names, plus a key that is or ends in
-// pass/pwd, Authorization, Cookie.
-const SECRET_KEY = new RegExp(String.raw`^[A-Z0-9_-]*(${NAMES})[A-Z0-9_-]*$|^([A-Z0-9_-]*[_-])?(PASS|PWD)$|AUTHORIZATION|^(SET-)?COOKIE$`, 'i');
+// pass/pwd, Authorization, Cookie, and a key that is exactly auth (docker config.json "auth").
+const SECRET_KEY = new RegExp(String.raw`^[A-Z0-9_-]*(${NAMES})[A-Z0-9_-]*$|^([A-Z0-9_-]*[_-])?(PASS|PWD)$|AUTHORIZATION|^(SET-)?COOKIE$|^AUTH$`, 'i');
 // Upper-case environment names that are or end in _KEY (OPENAI_KEY, KEY); lower case (sort_key) is left.
 const ENV_KEY = String.raw`(?:[A-Z0-9]+_)*KEY`;
 export const isSecretKey = (k) => typeof k === 'string' && (SECRET_KEY.test(k) || new RegExp(`^${ENV_KEY}$`).test(k));
 // A secret-named value in an object (name/key field) or a word that names one, for the {"name": X, "value": Y} pair.
 const SECRET_NAME = String.raw`[A-Z0-9_-]*(?:${NAMES})[A-Z0-9_-]*|(?:[A-Z0-9]+_)+(?:PASS|PWD|KEY)|KEY`;
 // A long flag that takes a secret; --password-stdin, --token-file and the like take none.
-const SECRET_FLAG = String.raw`--(?:[a-z0-9]+-)*(?:password|passwd|pass|token|secret|api-?key|access-key|private-key)(?:-[a-z0-9]+)*(?<!-(?:stdin|file|env|cmd|command|prompt))`;
+const SECRET_FLAG = String.raw`--(?:[a-z0-9]+-)*(?:password|passwd|pass|pw|token|secret|api-?key|access-key|private-key)(?:-[a-z0-9]+)*(?<!-(?:stdin|file|env|cmd|command|prompt))`;
 export const isSecretFlag = (s) => typeof s === 'string' && new RegExp(`^${SECRET_FLAG}$`, 'i').test(s);
 // .netrc tokens are separated by whitespace, also an escaped \n inside a JSON string.
 const SEP = String.raw`(?:\s|\\[nrt])+`;
 const AUTH_SCHEMES = 'Bearer|Basic|Token|Negotiate|NTLM|ApiKey';
+// A YAML line break (also an escaped \n) and the rest of a line up to one.
+const YAML_NL = String.raw`(?:\n|\\n)`;
+const YAML_LINE = String.raw`(?:[^\n\\]|\\(?!n))*`;
 const AUTH_PARAM_SCHEMES = String.raw`Digest|OAuth|Hawk|AWS4-HMAC-SHA256|SCRAM-SHA-\d+`;
 
 const RULES = [
   // A key cut short (BEGIN without END: a truncated excerpt or output cap) is redacted to the end of the string.
-  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, R('private_key')],
+  // Also a PGP key (-----BEGIN PGP PRIVATE KEY BLOCK-----).
+  [/-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)/g, R('private_key')],
   [/sk-ant-[A-Za-z0-9_-]{10,}/g, R('api_key')],
   [/sk-(proj-)?[A-Za-z0-9_-]{20,}/g, R('api_key')],
   [/(?<![A-Za-z0-9])[sr]k_(?:live|test)_[A-Za-z0-9]{10,}/g, R('api_key')], // Stripe
@@ -60,11 +67,13 @@ const RULES = [
   [/(?<![A-Za-z0-9])hf_[A-Za-z0-9]{30,}/g, R('hf_token')],
   [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/g, R('aws_key')],
   [/xox[abprs]-[A-Za-z0-9-]{10,}/g, R('slack_token')],
+  // Slack incoming-webhook and workflow URLs: the path after services/ (or workflows/, triggers/) is the credential.
+  [/(\bhttps?:\/\/hooks\.slack\.com\/(?:services|workflows|triggers)\/)[A-Za-z0-9_\/-]+/g, `$1${R('slack_webhook')}`],
   [/AIza[0-9A-Za-z_-]{35}/g, R('google_key')],
   [/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g, R('jwt')],
   // "Authorization: <scheme> <credential>" is one header: the scheme is consumed with it, so the credential cannot
   // survive (see Deviations). Schemes with comma-separated parameters (Digest, ...) are redacted to the end of the line.
-  [new RegExp(String.raw`((?:Proxy-)?Authorization\\?["']?\s*:\s*\\?["']?)(?:(${AUTH_PARAM_SCHEMES})\s+[^\r\n]*|((?:${AUTH_SCHEMES})\s+)?(?!["']?\[REDACTED:)\S+)|\b(Bearer\s+)(?!\[REDACTED:)\S+`, 'gi'),
+  [new RegExp(String.raw`((?:Proxy-)?Authorization\\?["']?\s*:\s*\\?["']?)(?:(${AUTH_PARAM_SCHEMES})\s+[^\r\n]*|((?:${AUTH_SCHEMES})\s+)?(?!["']?\[REDACTED:)${WORD})|\b(Bearer\s+)(?!\[REDACTED:)${WORD}`, 'gi'),
     (m, pre, pscheme, scheme, bearer) => pre === undefined ? bearer + R('token') : pre + (pscheme ? `${pscheme} ` : scheme ?? '') + R('token')],
   // Cookie and Set-Cookie headers: the whole value, up to a quote or the end of the line.
   [/(\b(?:Set-)?Cookie\\?["']?\s*:\s*\\?["']?)[^"'\\\r\n]+/gi, `$1${R('cookie')}`],
@@ -76,6 +85,16 @@ const RULES = [
   [/(\bsshpass\b[^\n|;&]*?\s-p\s*)("[^"]*"|'[^']*'|\S+)/g, `$1${R('value')}`],
   // docker/podman login -p <password> (--password-stdin takes none).
   [/(\b(?:docker|podman|nerdctl|buildah|skopeo)\s+login\b[^\n|;&]*?\s-p\s*)("[^"]*"|'[^']*'|\S+)/g, `$1${R('value')}`],
+  // aws configure set [<profile>.]aws_secret_access_key | aws_session_token <value>.
+  [/(\baws\s+configure\b[^\n|;&]*?\bset\s+(?:[\w-]+\.)?(?:aws_secret_access_key|aws_session_token)\s+)("[^"]*"|'[^']*'|\S+)/g, `$1${R('value')}`],
+  // htpasswd -b [-c ...] <file> <user> <password>, or -nb <user> <password> (no file): the last one is the password.
+  [/(\bhtpasswd((?:\s+-[A-Za-z]+)+)\s+)("[^"]*"|'[^']*'|\S+)(\s+)("[^"]*"|'[^']*'|\S+)(?:(\s+)("[^"]*"|'[^']*'|\S+))?/g,
+    (m, pre, flags, a, s1, b, s2, c) => !/b/.test(flags) ? m : /n/.test(flags) ? pre + a + s1 + R('value') + (s2 ?? '') + (c ?? '')
+      : c === undefined ? m : pre + a + s1 + b + s2 + R('value')],
+  // Python requests auth=("user", "password").
+  [/(\bauth\s*=\s*\(\s*(?:"[^"]*"|'[^']*')\s*,\s*)("[^"]*"|'[^']*')/g, `$1${R('value')}`],
+  // A .pgpass line, host:port:database:user:password (port digits or *, exactly five fields): the last field.
+  [/(?<![^\s"'=>])((?:[^\s:"']+):(?:\d+|\*):(?:[^\s:"']+):(?:[^\s:"']+):)([^\s:"']+)(?![^\s"'])/g, `$1${R('value')}`],
   // .netrc: machine <h> | default, then login/account/port pairs, then password <value>.
   [new RegExp(String.raw`((?:\bmachine${SEP}\S+|\bdefault)(?:${SEP}(?:login|account|port)${SEP}\S+)*${SEP}password${SEP})(?!\[REDACTED:)((?:[^\s\\]|\\(?![nrt]))+)`, 'g'),
     `$1${R('value')}`],
@@ -85,6 +104,12 @@ const RULES = [
     (m, pre, _q, value) => keepOr(m, pre, value)],
   // argv arrays: the element after a secret flag ("--token", "x"), also escaped inside a string.
   [new RegExp(String.raw`((\\?")${SECRET_FLAG}\2\s*,\s*)${VALUE}`, 'gi'), (m, pre, _q, value) => keepOr(m, pre, value)],
+  // A YAML block (|) or folded (>) scalar under a secret key: every following line indented deeper than the key goes.
+  // Lines end at a newline or an escaped \n (inside a JSON or printf string).
+  [new RegExp(String.raw`(^|\n|\\n|["'])([ \t]*)((?:- )?(?:[A-Z0-9_-]*(?:${NAMES})[A-Z0-9_-]*|(?:[A-Z0-9]+_)+(?:PASS|PWD|KEY)|PASS|PWD)[ \t]*:[ \t]*)[|>][+-]?\d?[ \t]*(?:#${YAML_LINE})?(?:${YAML_NL}(?:\2[ \t]+${YAML_LINE}|[ \t]*(?=${YAML_NL})))+`, 'gi'),
+    (m, nl, indent, key) => nl + indent + key + R('value')],
+  // A quoted "auth" key (docker config.json, npm): its value.
+  [new RegExp(String.raw`((\\?["'])auth\2\s*:\s*)${VALUE}`, 'gi'), (m, pre, _q, value) => keepOr(m, pre, value)],
   [new RegExp(`${KEY_NAME}\\s*[=:]\\s*${VALUE}`, 'gi'), (m, name, _kw, _q, value) => keepOr(m, name, value)],
   // Environment-style names that are or end in PASS/PWD (DB_PASS=, MYSQL_PWD=, pass=).
   [new RegExp(String.raw`\b((?:[A-Z0-9]+_)+(?:PASS|PWD)|PASS)(\\?["']?)\s*[=:]\s*${VALUE}`, 'gi'), (m, name, _q, value) => keepOr(m, name, value)],
