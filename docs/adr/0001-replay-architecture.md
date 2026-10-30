@@ -183,7 +183,7 @@ existed but was opt-in. Separately, the probe accepted any connect error: a wrap
 **Decision.** Read-only is the default: `--ro-bind / /`, `--dev /dev`, `--proc /proc`, a tmpfs on `/tmp` and on
 `/run/user/<uid>`, the temp root bound read-write, hook scripts under a hidden dir bound read-only. `--writable-fs`
 is the opt-out (warning on stderr and in the report; still a fresh `/dev` and a hidden `/run/user/<uid>`);
-`--readonly-fs` is a deprecated no-op. The probe's Unix listener lives in the temp root, which every mode binds in,
+`--readonly-fs` is a deprecated no-op. The probe's Unix listener lives in the temp root, which both sandboxed modes bind in,
 every connect must fail with `EACCES`, and the same client run unwrapped must connect (positive control).
 
 **Cost.** Hooks that write outside the temp root (caches under `$HOME`, logs) now fail by default and show as

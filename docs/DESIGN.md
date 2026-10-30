@@ -137,12 +137,21 @@ All three are exported as env vars; in exec form (`args` set) they are also subs
   visible. So a hook cannot rewrite `~/.claude/settings.json`, `~/.bashrc` or `~/.config/systemd/user/` and get
   code run later outside the sandbox.
 - `--writable-fs` (opt-out, prints a warning on stderr and in the report): `--bind / /` instead of
-  `--ro-bind / /`, no tmpfs on `/tmp`; still `--dev /dev`, the tmpfs on `/run/user/<uid>` and `--ro-bind
-  <root>/snap <root>/snap` after the writable `/`. `--readonly-fs` is accepted as a deprecated no-op.
-  `--allow-network` runs unwrapped, so nothing protects `<root>/snap` from the hook (it can write any file of the
-  user's); the exclusive creates below still keep hook-replay itself from writing through a link it planted.
+  `--ro-bind / /`, no tmpfs on `/tmp`; still `--dev /dev`, the tmpfs on `/run/user/<uid>`, then `--ro-bind <root>
+  <root>` (the temp root bound read-only onto itself: a mount point cannot be renamed, so the hook gets `EBUSY` if
+  it tries to move `<root>` away and put a link at its path), then `--bind <root>/work <root>/work` and `--ro-bind
+  <root>/snap <root>/snap`. A directory above `<root>` that the user can write can still be renamed; the snapshot
+  checks below then stop the run. `--readonly-fs` is accepted as a deprecated no-op.
+  `--allow-network` runs unwrapped, so nothing protects `<root>/snap` or `<root>` from the hook (it can write,
+  rename or replace any file of the user's, and read the snapshots); the snapshot creates below still never open
+  an entry the hook planted, never land outside the snap directory hook-replay opened, and stop the run when that
+  directory's path changed.
 - `--unshare-all` gives new user, network, pid, ipc, uts and cgroup namespaces. `--new-session` stops a hook from
-  injecting input into the terminal. The bwrap binary is resolved on PATH once, at start.
+  injecting input into the terminal. The bwrap binary is never taken from PATH: it is the real path of the first
+  of `/usr/bin/bwrap`, `/bin/bwrap`, `/usr/local/bin/bwrap` that is a regular file owned by root and not writable by
+  group or others, in a directory with the same two properties; `--bwrap <path>` overrides this, unchecked. The
+  report shows which (`isolation.bwrap{path, from: 'system path'|'--bwrap'}`, and the header). No probe can defeat a
+  malicious wrapper binary: one that prints the answers the probe expects and runs the hook unwrapped passes it.
 - **seccomp** (`src/seccomp.js`, classic BPF built in JS, no dependencies, handed to bwrap on a fresh pipe as fd 3
   for every run, so the hook cannot rewrite it): `socket()` fails with `EACCES` for every address family, which
   closes filesystem Unix sockets (docker, D-Bus / `systemd-run --user`, ibus, editor sockets) that a network
@@ -164,10 +173,11 @@ signals behave as normal); exit codes pass through.
 0 for `true` and for the probe client; (2) inside, every one of these must fail with `EACCES` (the seccomp result;
 `ENOENT`, `ECONNREFUSED`, `ENETUNREACH` or `EPERM` would only show a hidden path, an empty network namespace or a
 dropped capability, which another family defeats): connect to a Unix socket the probe listens on in `<root>/work`
-(bound into the sandbox in every mode, so only seccomp can stop the connect); TCP connect to `127.0.0.1`, `::1`,
+(bound into the sandbox in both sandboxed modes, so only seccomp can stop the connect); TCP connect to `127.0.0.1`, `::1`,
 the first non-loopback IPv4 host address and the first global or ULA IPv6 host address (each when present);
 `os.networkInterfaces()` (glibc `getifaddrs` opens an `AF_NETLINK` socket); and, when `python3` is on PATH,
-`socket()` for `AF_PACKET`, raw IPv4 and raw IPv6 (not checked without python3; the reason says so); (3) the
+`socket()` for `AF_PACKET`, raw IPv4 and raw IPv6 (not checked without python3; the reason says so; `python3` is
+found on PATH, so a different one earlier on PATH can answer falsely); (3) the
 `/proc/self/ns/net` and `/proc/self/ns/pid` inodes inside must differ from hook-replay's own; (4) positive
 control: the same client run unwrapped must connect to every target that has a listener (`::1` has none on a host
 without IPv6 loopback; inside it must still be `EACCES`). Any other result (including a timeout or unparseable
@@ -198,23 +208,35 @@ hook id)` before reporting, so output is independent of concurrency; latency is 
 
 **Snapshot.** The temp root `<root>` = `mkdtemp(os.tmpdir()+'/hook-replay-')` (0700) holds `snap/` and `work/`
 (both 0700, created by hook-replay before any hook runs; `work/` holds `cwd/`, `tmp/`, `plugin-data/`). hook-replay
-creates nothing in `work/` after that and reads nothing from it. Per transcript, `<root>/snap/t-<n>.jsonl` (0400),
-created with `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` mode 0600 then `fchmod` 0400: an existing entry at that name (a
-link planted under `--allow-network`) is never opened; a random name `t-<n>-<hex>.jsonl` is used and the report
-gets a warning. Before a point runs: if `snapshotEnd > written`, append source bytes `[written, snapshotEnd)` read
-from the source file (bytes, never re-serialised; oversize lines included); if `snapshotEnd < written` (a Pre point
-released late), `ftruncate` to `snapshotEnd`. We write through our open fd. After each run, `lstat` the name: if it
+creates nothing in `work/` after that and reads nothing from it. `snap/` and `<root>` are opened once
+(`O_RDONLY|O_DIRECTORY|O_NOFOLLOW`) and their (dev, ino) kept. Per transcript, `<root>/snap/t-<n>.jsonl` (0400),
+created through the snap directory fd, as `/proc/self/fd/<fd>/t-<n>.jsonl` (the path itself where there is no
+`/proc`, `--allow-network` only), with `O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW` mode 0600 then `fchmod` 0400.
+`O_NOFOLLOW` covers only the last component; the fd path means a link elsewhere in the path (a renamed `<root>`
+or `snap/` with a link at the old path) cannot send the create to another directory. Before each create the path
+`<root>/snap` must still `lstat` as that directory (same dev and ino), else the run stops with a clear error (exit
+1). An existing entry at that name (a link planted under `--allow-network`) is never opened; a random name
+`t-<n>-<hex>.jsonl` is used and the report gets a warning. The hook is given `<root>/snap/<name>` as
+`transcript_path`. A source transcript is opened `O_RDONLY|O_NONBLOCK|O_NOFOLLOW` and must `fstat` as a regular
+file (a hook can replace one not yet processed with a FIFO, whose blocking open would stall hook-replay, signal
+handlers included); otherwise it is counted in `files_unreadable` and skipped. Before a point runs: if
+`snapshotEnd > written`, append source bytes `[written, snapshotEnd)` read from the source file (bytes, never re-serialised; oversize lines included); if `snapshotEnd < written` (a Pre point
+released late), `ftruncate` to `snapshotEnd`. We write through our open fd. After each run, `lstat` the name (through the fd path): if it
 is not a regular file or its inode, size or ctime differ from what we left (any write, chmod, `utimes` or
 replacement by the hook, a symlink included; ctime cannot be set back, unlike mtime), unlink the name (which
 removes a link, never its target) and recreate the snapshot from source under a new random name, never the one just
 removed; that run gets fidelity flag `snapshot_tampered` and the report a warning. In the sandbox this cannot
 happen (`snap/` is read-only there); it can under `--allow-network`. Kept as recorded, including earlier
 `stop_hook_summary` and hook attachment lines, because that is what a hook at that point could have seen; lines
-written after the point are not present. Delete each snapshot when its transcript finishes; remove `<root>` on
-exit (`rmSync` recursive, which unlinks symlinks and does not follow them). The signal handlers are installed as
-soon as `<root>` exists (before the probe, which already spawns sandboxes): on SIGINT, SIGTERM or SIGHUP, kill
-every running hook's process group, remove `<root>`, and exit 130, 143 or 129. SIGKILL cannot be handled: `<root>`
-then survives (§9).
+written after the point are not present. Delete each snapshot (through the fd path) when its transcript finishes. On exit, kill running hooks,
+unlink the snapshots still open (through the fd path), then remove `<root>` by path (`rmSync` recursive, which
+unlinks symlinks and does not follow them) only while the path still names the `<root>` that was opened; if it
+does not (a hook renamed `<root>` or a directory above it), remove `snap/` and `work/` through the `<root>` fd, then
+`rmdir` `<root>` under its current name (`readlink` of the fd) if that is still it. The new directory a hook made
+at the old path is the hook's and is left. The signal handlers are installed as
+soon as `<root>` exists (before the probe, which already spawns sandboxes): on SIGINT, SIGTERM or SIGHUP, do the
+same and exit 130, 143 or 129. SIGKILL cannot be handled: `<root>` then survives (§9). Unwrapped, the hook can copy
+the snapshots during the run, and a `setsid` child of it survives teardown (§9) and can write there afterwards.
 Peak disk ≈ concurrency × largest transcript (≈ 4 × 6.6 MB here).
 
 **Dry run** reconstructs, filters, matches, prints counts per hook × tool, runs nothing; when `--limit` cut a
@@ -303,13 +325,13 @@ h1   PreToolUse  Bash    2310      4   37    0    0     0     9     0       0   
 
 **`--json`** prints one object (or `--out <file>`, written 0600). Schema id `"hook-replay/report@1"`; adding
 fields keeps `@1`, removing or changing meaning bumps it. Top level: `schema, tool_version, generated_at,
-redacted, isolation{network:'bwrap'|'NOT ISOLATED', readonly_fs, probe}, config{timeout_s,
+redacted, isolation{network:'bwrap'|'NOT ISOLATED', readonly_fs, bwrap{path, from}|null, probe}, config{timeout_s,
 concurrency, cwd_mode, project_dir, filters, sample, limit}, corpus{files, lines, lines_malformed,
 lines_oversize, sessions, points_by_event}, sandbox_overhead_ms{wrapped{p50,p95}, unwrapped{p50,p95}}|null, warnings[], hooks[{id, key, event,
 matcher, command, source, if_ignored, runs, truncated, counts{<outcome>:n}, by_tool{<tool>:counts},
 mechanisms{<mechanism>:n}, flagged_real_ok, flagged_real_user_prompt, latency_ms{n,p50,p95,max}, samples[]}]`.
 
-**Exit codes.** 0 report produced · 1 internal failure · 2 usage/load error · 3 isolation unavailable without
+**Exit codes.** 0 report produced · 1 internal failure, or the snapshot directory's path changed during the run · 2 usage/load error · 3 isolation unavailable without
 `--allow-network` · 4 `--fail-on <outcome,...>` matched at least once · 130 / 143 / 129 stopped by SIGINT / SIGTERM /
 SIGHUP (hooks killed, temp files removed, no report).
 
@@ -319,7 +341,7 @@ On by default; `--show-raw` disables it and prints a warning line. Applied in `r
 any string field is **stored** in the report model, so neither renderer can see raw text. Covers every string
 from a transcript or hook output, file paths, the hook command, object keys inside `tool_input`, and the recorded
 filters. Inside `tool_input`, the whole value under a key that names a secret (rule 7's names, an upper-case key that
-is or ends in `_KEY`, a key that is or ends in `pass`/`pwd`, `Authorization`, `Cookie`) is replaced by
+is or ends in `_KEY`, a key that is or ends in `pass`/`pwd`, `Authorization`, `Cookie`, a key that is exactly `auth`) is replaced by
 `[REDACTED:value]` (a string, array or object; a number or boolean only when the key ends in the secret word, the
 keep rule of rule 7); so is the `value` of an object whose `name` or `key` field holds such a name, and an array
 element after a secret flag (`["--token", x]`, rule 7a's flags); then the serialised excerpt is redacted again. Every excerpt is redacted in full before the 300-character cut. **Everything else printed** goes through the same redactor: the stderr banner (hook command), settings
@@ -327,25 +349,36 @@ warnings (absolute paths), usage/load errors, the isolation error, `--dry-run` t
 embed anything), and internal errors, which print a one-line redacted message (the stack only with
 `HOOK_REPLAY_DEBUG=1`, also redacted). Order, each replaced by `[REDACTED:<kind>]`:
 
-1. `-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)` → `private_key` (a key
-   without END, cut short by an excerpt or output cap, is redacted to the end of the string)
+1. `-----BEGIN [A-Z ]*PRIVATE KEY( BLOCK)?-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY( BLOCK)?-----|$)` → `private_key`
+   (also a PGP private key block; a key without END, cut short by an excerpt or output cap, is redacted to the end
+   of the string)
 2. `sk-ant-[A-Za-z0-9_-]{10,}`, `sk-(proj-)?[A-Za-z0-9_-]{20,}`, Stripe `[sr]k_(live|test)_[A-Za-z0-9]{10,}` → `api_key`
 3. `gh[pousr]_[A-Za-z0-9]{20,}`, `github_pat_[A-Za-z0-9_]{20,}` → `github_token`; GitLab `glpat-[A-Za-z0-9_-]{20,}` →
    `gitlab_token`; npm `npm_[A-Za-z0-9]{36}` → `npm_token`; Hugging Face `hf_[A-Za-z0-9]{30,}` → `hf_token` (these
    prefixes may follow `_`, as inside a tool name, but not a letter or digit)
 4. `\b(AKIA|ASIA)[A-Z0-9]{16}\b` → `aws_key`; `xox[abprs]-[A-Za-z0-9-]{10,}` → `slack_token`;
+   `https://hooks.slack.com/(services|workflows|triggers)/` then the path → keep the prefix, `slack_webhook`;
    `AIza[0-9A-Za-z_-]{35}` → `google_key`
 5. `eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}` → `jwt`
 6. `Authorization:` (also quoted, as a JSON key, and `Proxy-Authorization`) with an optional scheme (`Bearer`,
-   `Basic`, `Token`, `Negotiate`, `NTLM`, `ApiKey`) then `\S+`, or `Bearer\s+\S+` → keep the prefix, `token`.
+   `Basic`, `Token`, `Negotiate`, `NTLM`, `ApiKey`) then a word, or `Bearer\s+` and a word → keep the prefix,
+   `token`. A **word** is non-space characters up to whitespace, except that it ends before a closing quote (`"`,
+   `'`, also `\"`) that is followed by whitespace, an escaped `\n`, `,`, `;`, `)`, `]`, `}` or the end, so
+   `"Authorization: Bearer x"]` keeps `"]`.
    Schemes with comma-separated parameters (`Digest`, `OAuth`, `Hawk`, `AWS4-HMAC-SHA256`, `SCRAM-SHA-*`) are
    redacted to the end of the line.
    6a. `Cookie:` / `Set-Cookie:` → the value up to a quote or the end of the line, `cookie`.
    6b. URL query parameters `token|access_token|refresh_token|id_token|api_key|apikey|key|secret|client_secret|
-   password|passwd|sig|signature=` → the value up to `&`, `#`, whitespace or a quote, `value`.
+   password|passwd|sig|signature=` after `?`, `&` or `;` → the value up to `&`, `#`, whitespace or a quote, `value`.
    6c. `-u` / `--user` followed by `user:password` (a `digits:digits` uid:gid is left) and `sshpass -p <x>` →
    `value`.
    6d. `docker|podman|nerdctl|buildah|skopeo login ... -p <x>` → `value` (`--password-stdin` takes no value).
+   6d1. `aws configure ... set [<profile>.]aws_secret_access_key|aws_session_token <x>` → `value`.
+   6d2. `htpasswd` with flags that include `b`: the third argument after the flags (`-b file user pw`), or the
+   second with `n` (`-nb user pw`) → `value`.
+   6d3. `auth=("user", "pw")` (Python requests) → the second string, `value`.
+   6d4. A `.pgpass` line: exactly five `:`-separated fields, the second digits or `*` → the last field, `value`.
+   Any such five-field string goes, also when it is not a `.pgpass` line.
    6e. `.netrc`: `machine <host>` or `default`, then any `login|account|port <x>` pairs, then `password <x>` →
    `value`; the separators may be whitespace or an escaped `\n`/`\t` inside a JSON string.
    6f. `name` or `key`, `:` or `=`, a secret name (rule 7's, or a name ending in `_PASS`, `_PWD` or `_KEY`, or
@@ -353,6 +386,10 @@ embed anything), and internal errors, which print a one-line redacted message (t
    `- name: X\n  value: Y`) → `value`. Name before value only in text; the structured path takes either order.
    6g. A quoted secret flag (rule 7a's) followed by `,` and a value, as in an argv array `["--token", "x"]`, also
    escaped inside a string → `value`.
+   6h. A YAML block or folded scalar under a secret name (rule 7's, or ending in `_PASS`, `_PWD`, `_KEY`, or a bare
+   `pass`/`pwd`): `name: |` or `name: >` (with `+`/`-`/a digit, a comment) at the start of a line or after a quote,
+   and every following line indented deeper than the name (lines may end in an escaped `\n`) → `name: [REDACTED:value]`.
+   6i. A quoted `"auth"` key, `:`, and a value → `value` (with the keep rule).
 7. A name matching `[A-Z0-9_-]*(SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|API[_-]?KEY|ACCESS[_-]KEY|
    PRIVATE[_-]KEY|ACCOUNT[_-]?KEY|SHARED[_-]?ACCESS[_-]?KEY)[A-Z0-9_-]*` (case-insensitive; so also `X-Api-Key`,
    `Api-Key`, `db_password`, `PGPASSWORD`, Azure `AccountKey`); or, case-insensitive, a bare `PASS` or a name that
@@ -361,12 +398,12 @@ embed anything), and internal errors, which print a one-line redacted message (t
    a name that is or ends in `_KEY` (`OPENAI_KEY`, `KEY`; `sort_key` stays). Then an optional closing quote
    (`"api_key":`, or `\"secret\":` inside a JSON string), then `=` or `:`, then a value (a number, `true`, `false`
    or `null`; `"..."`, `'...'`, `\"...\"` where an inner escaped quote `\\\"` does not end it; a flat `[...]` array
-   or `{...}` object, so every element goes, also inside a string; or `\S+`) → keep the name, `value`.
+   or `{...}` object, so every element goes, also inside a string; or a word, as in rule 6) → keep the name, `value`.
    **Keep rule** (rules 6f, 6g, 7): a boolean or `null` value is kept; a number is kept unless the name ends in a
    secret word (`SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|KEY|PASS|PWD|AUTHORIZATION|COOKIE`): so
    `max_tokens: 4096`, `tokenCount: 12`, `PASSWORD_MIN_LENGTH=8` and `TOKENIZERS_PARALLELISM=false` stay, and
    `PASSWORD=1234` and `api_key: 1234` go.
-   7a. CLI flags with a space before the value: `--[x-]password|passwd|pass|token|secret|api-key|access-key|
+   7a. CLI flags with a space before the value: `--[x-]password|passwd|pass|pw|token|secret|api-key|access-key|
    private-key[-x] <value>` (the value may not start with `-`) → `value`; a flag ending in `-stdin`, `-file`,
    `-env`, `-cmd`, `-command` or `-prompt` takes no secret and is left. `--password=X` is rule 7.
    7b. mysql/mariadb family only (`mysql`, `mysqldump`, `mariadb-dump`, ...): `-p` directly followed by ≥ 4
@@ -389,19 +426,22 @@ embed anything), and internal errors, which print a one-line redacted message (t
     digit and no segment is a lowercase word of 3+ letters.
 
 Human output then escapes C0/C1 control characters other than `\n`/`\t` as `\xNN` (transcripts can hold terminal
-escapes). Redaction is best-effort pattern matching, and the README says so.
+escapes). Redaction is best-effort pattern matching, and the README says so. **Known limits** (each measured): a
+secret in prose with no name, flag or key shape (`password hunter2`, pinned by a test), a header name and its value
+in two argv items (`"Authorization", "Token x"`), and a secret sent on standard input (`echo x | gh auth login
+--with-token`) are not redacted.
 
 ## 9. Threat model
 
 | Threat | Mitigation | Residual |
 |---|---|---|
-| Hook exfiltrates transcript data | bwrap namespaces + seccomp `socket()` → `EACCES` (no TCP/UDP, no filesystem or abstract Unix sockets, no io_uring), verified by a probe that requires `EACCES` inside for Unix, TCP over IPv4 and IPv6 (loopback and host addresses), netlink and (with python3) packet and raw sockets, own net and pid namespaces, and a successful connect unwrapped (§5); `SSH_AUTH_SOCK` is scrubbed; `/run/user/<uid>` hidden | a hook can still write what it read into `<root>/work` (or, with `--writable-fs`, any file but `<root>/snap`) for a later process to send; any FIFO the user can write outside `/tmp`, `/dev` and `/run/user/<uid>` (under `$HOME`, `/var/tmp`, ...; both measured by tests) stays writable on the read-only mount, because the kernel does not apply the read-only check to FIFOs, so a process outside that reads such a FIFO receives what the hook writes; with `--allow-network` nothing is isolated; non-Linux and architectures other than aarch64/x86_64 have no isolation at all |
+| Hook exfiltrates transcript data | bwrap (root-owned system path, or `--bwrap`) namespaces + seccomp `socket()` → `EACCES` (no TCP/UDP, no filesystem or abstract Unix sockets, no io_uring), verified by a probe that requires `EACCES` inside for Unix, TCP over IPv4 and IPv6 (loopback and host addresses), netlink and (with python3) packet and raw sockets, own net and pid namespaces, and a successful connect unwrapped (§5); `SSH_AUTH_SOCK` is scrubbed; `/run/user/<uid>` hidden | a hook can still write what it read into `<root>/work` (or, with `--writable-fs`, any file but `<root>/snap`) for a later process to send; any FIFO the user can write outside `/tmp`, `/dev` and `/run/user/<uid>` (under `$HOME`, `/var/tmp`, ...; both measured by tests) stays writable on the read-only mount, because the kernel does not apply the read-only check to FIFOs, so a process outside that reads such a FIFO receives what the hook writes; with `--allow-network` nothing is isolated; non-Linux and architectures other than aarch64/x86_64 have no isolation at all; a malicious wrapper binary (given with `--bwrap`, or put in a system path by root) passes the probe |
 | Hook side effects × N (writes, deletes, logs) | banner, `--dry-run`, temp cwd, `CLAUDE_HOOK_REPLAY=1`, read-only filesystem by default (only `<root>/work` writable), fresh `/dev`, tmpfs on `/tmp` and `/run/user/<uid>` | with `--writable-fs` the hook can write anywhere the user can, N times (including files such as `~/.claude/settings.json`, `~/.bashrc` or `~/.config/systemd/user/` that something outside the sandbox runs later); with `--allow-network` also. Same trust as enabling it, but N× the exposure |
 | Daemonising / fork-bomb hook | pid namespace killed on timeout; process group killed unwrapped; running hooks killed on SIGINT/SIGTERM/SIGHUP | CPU, memory and process count are not limited in v0.1; unwrapped (`--allow-network`, no pid namespace) a `setsid` child leaves the process group and survives the timeout and SIGINT/SIGTERM/SIGHUP of hook-replay |
-| Hook makes hook-replay write a file for it (a symlink planted where hook-replay creates or recreates a snapshot) | `<root>/snap` read-only in the sandbox in every mode; every create `O_CREAT\|O_EXCL\|O_NOFOLLOW` 0600, a recreation under a new random name, `lstat` before judging, unlink (never follow) of a changed entry; teardown `rmSync` unlinks links; nothing created in or read from `<root>/work` after setup | with `--allow-network` the hook runs unwrapped and can write `snap/` (and any user file) itself; the parent still does not write through its links, and the report says so |
+| Hook makes hook-replay write a file for it (a symlink planted where hook-replay creates or recreates a snapshot, or a renamed `<root>` or `snap/` with a link at the old path) | in both sandboxed modes `<root>/snap` is read-only, and with `--writable-fs` `<root>` is bound read-only onto itself so it cannot be renamed; every create goes through the snap directory fd (`/proc/self/fd/<fd>/<name>`) with `O_CREAT\|O_EXCL\|O_NOFOLLOW` 0600, after checking that the path still names that directory (else the run stops, exit 1); a recreation under a new random name, `lstat` before judging, unlink (never follow) of a changed entry; teardown removes `<root>` by path only while the path still names it, else through the `<root>` fd; nothing created in or read from `<root>/work` after setup | with `--allow-network` the hook runs unwrapped and can write, rename or replace `snap/` and `<root>` (and any user file) itself and read the snapshots; the parent still does not create outside the directory it opened, it stops the run when that directory's path changed, and the report says when a snapshot was changed; with `--writable-fs` a directory above `<root>` can be renamed, which stops the run |
 | Output bomb | 1 MiB caps | — |
 | Transcript text as terminal escapes | control-char escaping | — |
-| Secrets in report | §8 redaction, 0600 `--out` | pattern misses; raw prefixes sit in 0700 temp during the run and survive SIGKILL of hook-replay |
+| Secrets in report | §8 redaction, 0600 `--out` | pattern misses (§8 limits); raw prefixes sit in 0700 temp during the run and survive SIGKILL of hook-replay; unwrapped, a hook can copy them |
 | Shipping private data | only synthetic fixtures; `package.json` `files` allowlist; test of `npm pack --dry-run` | — |
 | Hook runs another project's script via `${CLAUDE_PROJECT_DIR}` | project dir is one fixed value | — |
 
