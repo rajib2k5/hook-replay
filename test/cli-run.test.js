@@ -45,7 +45,7 @@ test('exec-form placeholders resolve to --plugin-root and --project-dir; CLAUDE_
   const r = cli(['--settings', f, '--plugin-root', path.join(d, 'plug'), '--project-dir', d, '--session', 'aaaaaaaa-0000-4000-8000-000000000001', '--json', '--show-raw']);
   assert.equal(r.status, 0, r.stderr);
   const s = JSON.parse(r.stdout).hooks[0].samples[0];
-  assert.match(s.reason, new RegExp(`^root=${path.join(d, 'plug')} proj=${d} data=/.*hook-replay-[^/]+/plugin-data replay=1$`));
+  assert.match(s.reason, new RegExp(`^root=${path.join(d, 'plug')} proj=${d} data=/.*hook-replay-[^/]+/work/plugin-data replay=1$`));
   assert.equal(cli(['--settings', f, '--dry-run']).status, 2, 'refused without --plugin-root');
 });
 

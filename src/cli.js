@@ -202,7 +202,7 @@ async function run(argv, io, setRedactor) {
     if (e instanceof IsolationError) { io.stderr.write(`hook-replay: ${red(e.message)}\n`); return 3; }
     throw e;
   }
-  const warnings = [...opts.loadWarnings];
+  const warnings = [...opts.loadWarnings, ...res.warnings];
   if (opts.hooks.some(h => h.ifIgnored)) warnings.push('--ignore-if: hooks with an if field ran on every matcher hit, so their counts are an upper bound');
   if (opts.showRaw) warnings.push('redaction OFF (--show-raw): this report contains raw transcript text');
   if (res.corpus.files_unreadable) warnings.push(`${res.corpus.files_unreadable} transcript file(s) could not be read and were skipped`);

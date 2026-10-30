@@ -29,9 +29,9 @@ for (const [sig, code, allowNetwork] of cases) {
     t.after(() => { spawnSync('pkill', ['-f', `sleep ${marker}`]); fs.rmSync(d, { recursive: true, force: true }); });
     const tmpdir = path.join(d, 'tmpdir');
     fs.mkdirSync(tmpdir);
-    // The hook marks that it started in the temp root (the one place a sandboxed hook can write: the filesystem is
+    // The hook marks that it started in <root>/work (the one place a sandboxed hook can write: the filesystem is
     // read-only by default), backgrounds one sleep (stays in its process group) and then hangs in another.
-    const started = () => fs.readdirSync(tmpdir).some(n => n.startsWith('hook-replay-') && fs.existsSync(path.join(tmpdir, n, 'plugin-data', 'started')));
+    const started = () => fs.readdirSync(tmpdir).some(n => n.startsWith('hook-replay-') && fs.existsSync(path.join(tmpdir, n, 'work', 'plugin-data', 'started')));
     const hook = `touch "$CLAUDE_PLUGIN_DATA/started"; sleep ${marker} & sleep ${marker}`;
     const child = spawn(process.execPath, [path.join(root, 'bin/hook-replay.js'), '--projects-dir', projects, '--session', 'cccccccc-0000-4000-8000-000000000003',
       '--hook', hook, '--event', 'PreToolUse', '--timeout', '60', ...(allowNetwork ? ['--allow-network'] : [])],
@@ -47,15 +47,16 @@ for (const [sig, code, allowNetwork] of cases) {
   });
 }
 
-test('the temp root is 0700 and its subdirectories are not group/world readable', async (t) => {
+test('the temp root, snap/, work/ and the subdirectories of work/ are 0700', async (t) => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-perm-'));
   t.after(() => fs.rmSync(d, { recursive: true, force: true }));
   const out = path.join(d, 'modes');
-  const hook = `stat -c %a "$(dirname "$TMPDIR")" "$TMPDIR" "$CLAUDE_PLUGIN_DATA" "$PWD" > ${out}`;
+  const hook = 'tp=$(sed -n \'s/.*"transcript_path":"\\([^"]*\\)".*/\\1/p\'); ' +
+    `stat -c %a "$(dirname "$(dirname "$TMPDIR")")" "$(dirname "$tp")" "$(dirname "$TMPDIR")" "$TMPDIR" "$CLAUDE_PLUGIN_DATA" "$PWD" > ${out}`;
   const r = spawnSync(process.execPath, [path.join(root, 'bin/hook-replay.js'), '--projects-dir', projects, '--session', 'cccccccc-0000-4000-8000-000000000003',
     '--hook', hook, '--event', 'PreToolUse', '--allow-network'], { encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
-  assert.equal(fs.readFileSync(out, 'utf8'), '700\n700\n700\n700\n');
+  assert.equal(fs.readFileSync(out, 'utf8'), '700\n700\n700\n700\n700\n700\n');
 });
 
 test('SIGTERM while the isolation probe runs still removes the temp root', { skip: !hasBwrap && 'bwrap is not installed' }, async (t) => {

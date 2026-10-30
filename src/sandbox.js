@@ -27,14 +27,17 @@ export function runUserDir(uid = process.getuid?.()) {
 }
 
 // Default (read-only): the host root read-only, a fresh /dev (no host /dev/pts terminals, a private /dev/shm),
-// a tmpfs on /tmp (host FIFOs and sockets there are gone) and on /run/user/<uid>, only the temp root writable. So a
-// hook cannot rewrite ~/.claude/settings.json or ~/.bashrc for something outside the sandbox to run later.
-// --writable-fs binds the root writable but keeps the fresh /dev and the hidden /run/user/<uid>.
-export function wrapperArgv(kind, argv, { writableFs = false, tmp, binary, binds = [], runUser = runUserDir() } = {}) {
+// a tmpfs on /tmp (host FIFOs and sockets there are gone) and on /run/user/<uid>, only `work` (<root>/work: cwd,
+// TMPDIR, plugin data) writable. So a hook cannot rewrite ~/.claude/settings.json or ~/.bashrc for something outside
+// the sandbox to run later. `snap` (<root>/snap, the transcript snapshots) is bound read-only at the same path in
+// every mode, last, so transcript_path resolves and the hook cannot create, replace or link entries there: the
+// files hook-replay itself opens outside the sandbox. --writable-fs binds the root writable but keeps the fresh
+// /dev, the hidden /run/user/<uid> and the read-only `snap`.
+export function wrapperArgv(kind, argv, { writableFs = false, work, snap, binary, binds = [], runUser = runUserDir() } = {}) {
   if (kind !== 'bwrap') return argv;
   const fsArgs = [...(writableFs ? ['--bind', '/', '/'] : ['--ro-bind', '/', '/']), '--dev', '/dev', '--proc', '/proc',
     ...(writableFs ? [] : ['--tmpfs', '/tmp']), ...(runUser ? ['--tmpfs', runUser] : []),
-    ...binds.flatMap(b => ['--ro-bind', b, b]), '--bind', tmp, tmp];
+    ...binds.flatMap(b => ['--ro-bind', b, b]), '--bind', work, work, ...(snap ? ['--ro-bind', snap, snap] : [])];
   return [binary ?? 'bwrap', ...fsArgs, '--unshare-all', '--new-session', '--die-with-parent', '--seccomp', String(SECCOMP_FD), '--', ...argv];
 }
 
@@ -83,17 +86,17 @@ const listenOn = (...args) => new Promise((resolve, reject) => {
 // namespace, which a different socket defeats. (3) No listener may see a connection. (4) Positive control: the
 // same client run unwrapped must connect to every listener, so the listeners were reachable to begin with.
 // `wrap` builds the wrapped argv and `control` the unwrapped one (tests inject broken ones).
-export async function probe({ tmp, writableFs = false, binary, filter = seccompFilter(), wrap, control = (argv) => argv } = {}) {
-  const w = wrap ?? ((argv) => wrapperArgv('bwrap', argv, { writableFs, tmp, binary }));
+export async function probe({ work, snap, writableFs = false, binary, filter = seccompFilter(), wrap, control = (argv) => argv } = {}) {
+  const w = wrap ?? ((argv) => wrapperArgv('bwrap', argv, { writableFs, work, snap, binary }));
   const extraInput = filter ? [filter] : [];
-  const run = (argv, input = extraInput) => runHook({ argv, stdin: '', env: { PATH: process.env.PATH }, cwd: tmp, timeoutMs: 10000,
+  const run = (argv, input = extraInput) => runHook({ argv, stdin: '', env: { PATH: process.env.PATH }, cwd: work, timeoutMs: 10000,
     timeoutSource: 'replay_cap', extraInput: input });
   const trivial = await run(w(['true']));
   if (trivial.spawnError) return { ok: false, reason: `bwrap: ${trivial.spawnError}` };
   if (trivial.exitCode !== 0) return { ok: false, reason: `bwrap: exit ${trivial.exitCode ?? trivial.signal} for a trivial command: ${trivial.stderr.trim().slice(0, 200)}` };
   const listeners = [];
   try {
-    const sock = path.join(tmp, `probe-${process.pid}.sock`);
+    const sock = path.join(work, `probe-${process.pid}.sock`);
     const targets = [];
     const add = async (name, args, opts) => { listeners.push({ name, ...(await listenOn(...args)) }); targets.push({ name, opts: opts(listeners.at(-1).server) }); };
     await add('unix', [sock], () => ({ path: sock }));
@@ -131,14 +134,14 @@ function which(cmd) {
   return cmd;
 }
 
-export async function chooseIsolation({ allowNetwork = false, writableFs = false, tmp, binary = 'bwrap', arch = process.arch, platform = process.platform }) {
+export async function chooseIsolation({ allowNetwork = false, writableFs = false, work, snap, binary = 'bwrap', arch = process.arch, platform = process.platform }) {
   if (allowNetwork) return { network: 'NOT ISOLATED', wrapper: null, readonly_fs: false, probe: 'not probed (--allow-network)', filter: null };
   const unavailable = (why) => new IsolationError(`no isolation available (${why}); pass --allow-network to run without it`);
   if (platform !== 'linux') throw unavailable(`isolation needs Linux bwrap, this is ${platform}`);
   const filter = seccompFilter(arch);
   if (!filter) throw unavailable(`no seccomp program for architecture ${arch}`);
   const bin = which(binary);
-  const r = await probe({ tmp, writableFs, binary: bin, filter });
+  const r = await probe({ work, snap, writableFs, binary: bin, filter });
   if (!r.ok) throw unavailable(r.reason);
   return { network: 'bwrap', wrapper: 'bwrap', binary: bin, readonly_fs: !writableFs, probe: r.reason, filter };
 }
@@ -146,12 +149,12 @@ export async function chooseIsolation({ allowNetwork = false, writableFs = false
 // Latency of `true`, 20 runs unwrapped and 20 wrapped, reported as two distributions. Differences of percentiles
 // of two independent samples can come out inverted (p95 < p50) or negative, so none is reported. null unwrapped.
 // `time(argv, extraInput)` returns the latencies of `runs` runs (tests inject it).
-export async function measureOverhead(isolation, { tmp, runs = 20, time } = {}) {
+export async function measureOverhead(isolation, { work, snap, runs = 20, time } = {}) {
   if (!isolation.wrapper) return null;
   const timeRuns = time ?? (async (argv, extraInput) => {
     const xs = [];
     for (let i = 0; i < runs; i++) {
-      const r = await runHook({ argv, stdin: '', env: { PATH: process.env.PATH }, cwd: tmp, timeoutMs: 5000, timeoutSource: 'replay_cap', extraInput });
+      const r = await runHook({ argv, stdin: '', env: { PATH: process.env.PATH }, cwd: work, timeoutMs: 5000, timeoutSource: 'replay_cap', extraInput });
       xs.push(r.latencyMs);
     }
     return xs;
@@ -159,6 +162,6 @@ export async function measureOverhead(isolation, { tmp, runs = 20, time } = {}) 
   const round = (x) => Math.round(x * 100) / 100;
   const summary = (xs) => ({ p50: round(percentile(xs, 0.5)), p95: round(percentile(xs, 0.95)) });
   const unwrapped = summary(await timeRuns(['true'], []));
-  const wrapped = summary(await timeRuns(wrapperArgv(isolation.wrapper, ['true'], { writableFs: !isolation.readonly_fs, tmp, binary: isolation.binary }), [isolation.filter]));
+  const wrapped = summary(await timeRuns(wrapperArgv(isolation.wrapper, ['true'], { writableFs: !isolation.readonly_fs, work, snap, binary: isolation.binary }), [isolation.filter]));
   return { wrapped, unwrapped };
 }

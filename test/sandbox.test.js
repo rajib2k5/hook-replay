@@ -92,18 +92,19 @@ for (const arch of ['arm64', 'x64']) {
 test('seccomp: an unsupported architecture has no program, and isolation is refused there', async (t) => {
   assert.equal(program('ia32'), null);
   assert.equal(seccompFilter('riscv64'), null);
-  await assert.rejects(chooseIsolation({ tmp: tmpDir(t), arch: 'riscv64' }), (e) => e instanceof IsolationError && /riscv64/.test(e.message));
+  await assert.rejects(chooseIsolation({ work: tmpDir(t), arch: 'riscv64' }), (e) => e instanceof IsolationError && /riscv64/.test(e.message));
 });
 
-test('wrapperArgv: read-only root by default, --writable-fs binds / writable; both get a fresh /dev and hide /run/user/<uid>', () => {
+test('wrapperArgv: read-only root by default, --writable-fs binds / writable; both get a fresh /dev, hide /run/user/<uid>, bind snap/ read-only last', () => {
   const ns = ['--unshare-all', '--new-session', '--die-with-parent', '--seccomp', '3', '--'];
   const run = ['--tmpfs', '/run/user/1000'];
-  assert.deepEqual(wrapperArgv('bwrap', ['true'], { tmp: '/t/x', binds: ['/tmp/h.sh'], runUser: '/run/user/1000' }),
+  const snap = ['--ro-bind', '/t/snap', '/t/snap'];
+  assert.deepEqual(wrapperArgv('bwrap', ['true'], { work: '/t/work', snap: '/t/snap', binds: ['/tmp/h.sh'], runUser: '/run/user/1000' }),
     ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', ...run, '--ro-bind', '/tmp/h.sh', '/tmp/h.sh',
-      '--bind', '/t/x', '/t/x', ...ns, 'true']);
-  assert.deepEqual(wrapperArgv('bwrap', ['sh', '-c', 'x'], { writableFs: true, tmp: '/t/x', runUser: '/run/user/1000' }),
-    ['bwrap', '--bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...run, '--bind', '/t/x', '/t/x', ...ns, 'sh', '-c', 'x']);
-  assert.deepEqual(wrapperArgv('bwrap', ['true'], { tmp: '/t/x', runUser: null }),
+      '--bind', '/t/work', '/t/work', ...snap, ...ns, 'true']);
+  assert.deepEqual(wrapperArgv('bwrap', ['sh', '-c', 'x'], { writableFs: true, work: '/t/work', snap: '/t/snap', runUser: '/run/user/1000' }),
+    ['bwrap', '--bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...run, '--bind', '/t/work', '/t/work', ...snap, ...ns, 'sh', '-c', 'x']);
+  assert.deepEqual(wrapperArgv('bwrap', ['true'], { work: '/t/x', runUser: null }),
     ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--bind', '/t/x', '/t/x', ...ns, 'true']);
   assert.deepEqual(wrapperArgv(null, ['true'], {}), ['true']);
 });
@@ -119,14 +120,14 @@ test('hookBinds: existing files under a hidden dir (/tmp, /run/user/<uid>) named
 });
 
 test('probe fails when the bwrap binary does not exist', async (t) => {
-  const r = await probe({ tmp: tmpDir(t), binary: '/nonexistent/bwrap' });
+  const r = await probe({ work: tmpDir(t), binary: '/nonexistent/bwrap' });
   assert.equal(r.ok, false);
 });
 
 test('--allow-network runs hooks unwrapped and labels them NOT ISOLATED: the host port is reachable', async (t) => {
   const server = await listen(t, 0, '127.0.0.1');
   const cmd = connectCmd(`${server.address().port},'127.0.0.1'`);
-  const iso = await chooseIsolation({ allowNetwork: true, tmp: tmpDir(t) });
+  const iso = await chooseIsolation({ allowNetwork: true, work: tmpDir(t) });
   assert.deepEqual([iso.network, iso.wrapper], ['NOT ISOLATED', null]);
   const res = await runOne({ hook: cmd }, { allowNetwork: true });
   assert.equal(res.isolation.network, 'NOT ISOLATED');
@@ -134,7 +135,7 @@ test('--allow-network runs hooks unwrapped and labels them NOT ISOLATED: the hos
 });
 
 test('chooseIsolation refuses (exit-3 error) when the probe fails and --allow-network is absent', async (t) => {
-  await assert.rejects(chooseIsolation({ tmp: tmpDir(t), binary: '/nonexistent/bwrap' }), IsolationError);
+  await assert.rejects(chooseIsolation({ work: tmpDir(t), binary: '/nonexistent/bwrap' }), IsolationError);
 });
 
 test('(f) unwrapped: a hook that backgrounds a child leaves no process behind after its timeout', async (t) => {
@@ -158,19 +159,19 @@ test('(f) control: pgrep does see a setsid sleep started outside the sandbox', a
 const skip = noBwrap;
 
 test('probe passes under the real bwrap wrapper', { skip }, async (t) => {
-  const r = await probe({ tmp: tmpDir(t) });
+  const r = await probe({ work: tmpDir(t) });
   assert.equal(r.ok, true, r.reason);
 });
 
 test('probe fails when the wrapper does not isolate (every connection is attempted and checked)', { skip }, async (t) => {
-  const r = await probe({ tmp: tmpDir(t), wrap: (argv) => argv });
+  const r = await probe({ work: tmpDir(t), wrap: (argv) => argv });
   assert.equal(r.ok, false);
   assert.match(r.reason, /unix connected/);
 });
 
 test('probe fails when the wrapper isolates but exits non-zero', { skip }, async (t) => {
   const tmp = tmpDir(t);
-  const r = await probe({ tmp, wrap: (argv) => ['sh', '-c', '"$@"; exit 9', 'sh', ...wrapperArgv('bwrap', argv, { tmp })] });
+  const r = await probe({ work: tmp, wrap: (argv) => ['sh', '-c', '"$@"; exit 9', 'sh', ...wrapperArgv('bwrap', argv, { work: tmp })] });
   assert.equal(r.ok, false);
   assert.match(r.reason, /exit 9/);
 });
@@ -295,8 +296,27 @@ test('default: a hook script stored under /tmp still runs (its path is bound rea
   assert.deepEqual([res.results[0].run.exitCode, res.results[0].run.stdout], [0, 'ran\n']);
 });
 
+// Round-4 review (atk2.js): the snapshots sat in the hook-writable temp root. Now the hook can write only <root>/work.
+const SNAP_WRITE = 'tp=$(sed -n \'s/.*"transcript_path":"\\([^"]*\\)".*/\\1/p\'); d=$(dirname "$tp"); ' +
+  'touch "$d/new" 2>/dev/null && echo created; ln -s /etc/hostname "$d/link" 2>/dev/null && echo linked; ' +
+  'chmod u+w "$tp" 2>/dev/null && echo chmod; mv "$tp" "$d/moved" 2>/dev/null && echo moved; touch "$TMPDIR/w" "$CLAUDE_PLUGIN_DATA/w" ./w && echo work; ' +
+  'case "$tp" in "$(dirname "$(dirname "$TMPDIR")")"/snap/*) echo layout;; esac';
+test('default and --writable-fs: the hook cannot create, link, chmod or move entries in snap/; it can write work/', { skip }, async () => {
+  for (const extra of [{}, { writableFs: true }]) {
+    const res = await runOne({ hook: SNAP_WRITE }, extra);
+    assert.equal(res.results[0].run.stdout, 'work\nlayout\n', JSON.stringify(extra) + res.results[0].run.stderr);
+  }
+});
+
+test('--allow-network (control): unwrapped, the hook can write snap/, so the probe of that test is meaningful', async () => {
+  const res = await runOne({ hook: SNAP_WRITE }, { allowNetwork: true });
+  assert.equal(res.results[0].run.stdout, 'created\nlinked\nchmod\nmoved\nwork\nlayout\n');
+  assert.ok(res.results[0].fidelity.includes('snapshot_tampered'), res.results[0].fidelity.join(','));
+  assert.ok(res.warnings.some(w => /changed, replaced or removed/.test(w)), res.warnings.join('\n'));
+});
+
 test('--allow-network: unwrapped, so the filesystem is not read-only', async (t) => {
-  const iso = await chooseIsolation({ allowNetwork: true, tmp: tmpDir(t) });
+  const iso = await chooseIsolation({ allowNetwork: true, work: tmpDir(t) });
   assert.equal(iso.readonly_fs, false);
 });
 
@@ -314,35 +334,35 @@ test('sandbox overhead: wrapped and unwrapped `true` are reported as two distrib
   const plain = [...Array(18).fill(1), 30, 30];
   const wrapped = [...Array(18).fill(20), 21, 21];
   const time = async (argv) => (argv[0] === 'true' ? plain : wrapped);
-  const o = await measureOverhead({ wrapper: 'bwrap', filter: Buffer.alloc(0) }, { tmp: '/nonexistent', time });
+  const o = await measureOverhead({ wrapper: 'bwrap', filter: Buffer.alloc(0) }, { work: '/nonexistent', time });
   assert.deepEqual(o, { wrapped: { p50: 20, p95: 21 }, unwrapped: { p50: 1, p95: 30 } });
-  assert.equal(await measureOverhead({ wrapper: null }, { tmp: '/nonexistent', time }), null);
+  assert.equal(await measureOverhead({ wrapper: null }, { work: '/nonexistent', time }), null);
 });
 
 // Round-3 review: the probe took any "error <code>" as isolated, so a wrapper that only hid the probe's socket
 // (ENOENT) and refused TCP (ECONNREFUSED) passed, and the same wrapper then reached the host's D-Bus socket.
 const noSeccomp = (argv) => ['bwrap', '--dev-bind', '/', '/', '--tmpfs', '/tmp', '--unshare-net', '--', ...argv];
 test('probe rejects a wrapper without seccomp that hides /tmp and unshares the network', { skip }, async (t) => {
-  const r = await probe({ tmp: tmpDir(t), wrap: noSeccomp });
+  const r = await probe({ work: tmpDir(t), wrap: noSeccomp });
   assert.equal(r.ok, false, r.reason);
 });
 
 test('probe rejects the real bwrap argv with --seccomp removed', { skip }, async (t) => {
   const tmp = tmpDir(t);
-  const wrap = (argv) => { const a = wrapperArgv('bwrap', argv, { tmp }); const i = a.indexOf('--seccomp'); a.splice(i, 2); return a; };
-  const r = await probe({ tmp, wrap });
+  const wrap = (argv) => { const a = wrapperArgv('bwrap', argv, { work: tmp }); const i = a.indexOf('--seccomp'); a.splice(i, 2); return a; };
+  const r = await probe({ work: tmp, wrap });
   assert.equal(r.ok, false, r.reason);
   assert.match(r.reason, /not EACCES/);
 });
 
 test('probe fails when its positive control cannot connect unwrapped', { skip }, async (t) => {
-  const r = await probe({ tmp: tmpDir(t), control: (argv) => ['sh', '-c', 'echo "{}"'] });
+  const r = await probe({ work: tmpDir(t), control: (argv) => ['sh', '-c', 'echo "{}"'] });
   assert.equal(r.ok, false);
   assert.match(r.reason, /control/);
 });
 
 test('probe reason states what was measured', { skip }, async (t) => {
-  const r = await probe({ tmp: tmpDir(t) });
+  const r = await probe({ work: tmpDir(t) });
   assert.equal(r.ok, true, r.reason);
   assert.match(r.reason, /socket\(\) EACCES inside for unix, tcp 127\.0\.0\.1/);
   assert.match(r.reason, /all connected unwrapped/);

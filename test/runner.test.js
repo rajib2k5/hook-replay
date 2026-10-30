@@ -41,7 +41,7 @@ test('commandArgv: shell form is sh -c, exec form is command + args', () => {
 
 test('buildEnv keeps only the allowlist plus replay variables and named --env vars', () => {
   const src = { PATH: '/bin', HOME: '/home/u', USER: 'u', SSH_AUTH_SOCK: '/tmp/agent', AWS_SECRET_ACCESS_KEY: 'x', LANG: 'C', MYVAR: 'v' };
-  const env = buildEnv({ source: src, tmp: '/t', projectDir: '/p', pluginRoot: undefined, envNames: ['MYVAR'] });
+  const env = buildEnv({ source: src, work: '/t', projectDir: '/p', pluginRoot: undefined, envNames: ['MYVAR'] });
   assert.deepEqual(env, {
     PATH: '/bin', HOME: '/home/u', USER: 'u', LANG: 'C', TMPDIR: '/t/tmp',
     CLAUDE_PROJECT_DIR: '/p', CLAUDE_PLUGIN_DATA: '/t/plugin-data', CLAUDE_HOOK_REPLAY: '1', MYVAR: 'v',

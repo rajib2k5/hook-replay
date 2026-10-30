@@ -21,12 +21,24 @@ export function effectiveTimeout(hookTimeoutS, capS) {
   return hookTimeoutS <= capS ? { seconds: hookTimeoutS, source: 'hook' } : { seconds: capS, source: 'replay_cap' };
 }
 
-function makeTmp() {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hook-replay-'));
-  fs.chmodSync(tmp, 0o700);
-  for (const d of ['cwd', 'tmp', 'plugin-data']) fs.mkdirSync(path.join(tmp, d), { mode: 0o700 });
-  return tmp;
+// The temp root has two halves (DESIGN.md §9): snap/ holds the transcript snapshots, which hook-replay opens outside
+// the sandbox, and is bound read-only into it; work/ (cwd, TMPDIR, plugin data) is the only place a sandboxed hook
+// can write. hook-replay creates nothing in work/ after this and reads nothing from it.
+export function makeRoot() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hook-replay-'));
+  fs.chmodSync(root, 0o700);
+  const dirs = { root, snap: path.join(root, 'snap'), work: path.join(root, 'work') };
+  fs.mkdirSync(dirs.snap, { mode: 0o700 });
+  fs.mkdirSync(dirs.work, { mode: 0o700 });
+  for (const d of ['cwd', 'tmp', 'plugin-data']) fs.mkdirSync(path.join(dirs.work, d), { mode: 0o700 });
+  return dirs;
 }
+
+// What a hook did to the snapshots (only possible unwrapped, under --allow-network), as report warnings.
+const TAMPER = {
+  name_taken: (n) => `${n} snapshot name(s) were already taken in the temp root when hook-replay created them (planted by a hook?); new names were used and the existing entries were not opened`,
+  changed: (n) => `a hook changed, replaced or removed its transcript snapshot ${n} time(s); each was recreated from the source under a new name (fidelity flag snapshot_tampered)`,
+};
 
 async function pool(items, n, fn) {
   let i = 0;
@@ -45,8 +57,10 @@ export async function replay(opts) {
   } = opts;
   const files = discover(projectsDir).filter(f => keepFile(f, filters) && (!filters.fileFilter || filters.fileFilter(f)));
   const s = await scan({ files, hooks, filters, includeSubagents, maxLineBytes, homedir, limit });
-  const tmp = makeTmp();
-  // Kill what still runs before removing the root: a live hook can recreate files in it.
+  const dirs = makeRoot();
+  const { root: tmp, snap: snapDir, work } = dirs;
+  // Kill what still runs before removing the root: a live hook can recreate files in it. rmSync does not follow
+  // symlinks (it unlinks them), so a link a hook left in work/ cannot make it empty the link's target.
   const cleanup = () => {
     killRunning();
     try { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ }
@@ -66,8 +80,8 @@ export async function replay(opts) {
   let isolation;
   let sandboxOverheadMs;
   try {
-    isolation = await chooseIsolation({ allowNetwork, writableFs, tmp, binary: bwrapBinary });
-    sandboxOverheadMs = await measureOverhead(isolation, { tmp });
+    isolation = await chooseIsolation({ allowNetwork, writableFs, work, snap: snapDir, binary: bwrapBinary });
+    sandboxOverheadMs = await measureOverhead(isolation, { work, snap: snapDir });
   } catch (e) {
     unhook();
     cleanup();
@@ -79,15 +93,17 @@ export async function replay(opts) {
       `  replay EXECUTES this hook ${s.perHook[h.id].points} times; a hook with side effects will perform them ${s.perHook[h.id].points} times\n`);
   }
 
-  const env = buildEnv({ source: envSource, tmp, projectDir, pluginRoot, envNames });
+  const env = buildEnv({ source: envSource, work, projectDir, pluginRoot, envNames });
   const hidden = isolation.wrapper ? hiddenDirs({ writableFs: !isolation.readonly_fs }) : [];
   const byId = Object.fromEntries(hooks.map(h => [h.id, h]));
   const results = [];
+  const tampered = { name_taken: 0, changed: 0 };
+  const onTamper = (kind) => { tampered[kind]++; };
   try {
-    const work = files.map((f, n) => ({ f, n })).filter(({ f }) => s.selected.has(f.relPath));
-    await pool(work, concurrency, async ({ f, n }) => {
+    const jobs = files.map((f, n) => ({ f, n })).filter(({ f }) => s.selected.has(f.relPath));
+    await pool(jobs, concurrency, async ({ f, n }) => {
       const sel = s.selected.get(f.relPath);
-      const snap = new Snapshot(f.path, path.join(tmp, `t-${n}.jsonl`));
+      const snap = new Snapshot(f.path, snapDir, `t-${n}`, { onTamper });
       try {
         for await (const p of filePoints(f, { includeSubagents, maxLineBytes, homedir })) {
           const ids = sel.get(p.key);
@@ -98,20 +114,20 @@ export async function replay(opts) {
           for (const id of ids) {
             const hook = byId[id];
             const t = effectiveTimeout(hook.timeoutS, timeoutS);
-            let cwd = path.join(tmp, 'cwd');
+            let cwd = path.join(work, 'cwd');
             if (cwdMode === 'recorded' && typeof p.payload.cwd === 'string') {
               try { if (fs.statSync(p.payload.cwd).isDirectory()) cwd = p.payload.cwd; } catch { /* keep temp cwd */ }
             }
             const cmd = commandArgv(hook, env);
-            const argv = wrapperArgv(isolation.wrapper, cmd, { writableFs: !isolation.readonly_fs, tmp, binary: isolation.binary,
+            const argv = wrapperArgv(isolation.wrapper, cmd, { writableFs: !isolation.readonly_fs, work, snap: snapDir, binary: isolation.binary,
               binds: hookBinds(cmd, hidden) });
             const run = await runHook({ argv, stdin, env, cwd, timeoutMs: t.seconds * 1000, timeoutSource: t.source,
               killGroup: true, extraInput: isolation.filter ? [isolation.filter] : [] });
-            snap.afterRun();
+            const changed = snap.afterRun();
             const verdict = classify(run, hook);
             results.push({ key: p.key, file: p.file, lineNo: p.lineNo, event: p.event, hookId: id, hook, tool: toolOf(p),
               sessionId: p.payload.session_id, timestamp: p.timestamp, payload: p.payload, snapshotEnd: p.snapshotEnd,
-              realSignal: p.realSignal, fidelity: p.fidelity, run, verdict });
+              realSignal: p.realSignal, fidelity: changed ? [...p.fidelity, 'snapshot_tampered'] : p.fidelity, run, verdict });
           }
         }
       } finally {
@@ -125,5 +141,6 @@ export async function replay(opts) {
   const hookOrder = Object.fromEntries(hooks.map((h, i) => [h.id, i]));
   results.sort((a, b) => Buffer.compare(Buffer.from(a.file), Buffer.from(b.file)) || a.lineNo - b.lineNo ||
     hookOrder[a.hookId] - hookOrder[b.hookId] || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  return { results, corpus: s.corpus, perHook: s.perHook, isolation, sandboxOverheadMs, tmpDir: tmp, total, files };
+  const warnings = Object.entries(tampered).filter(([, n]) => n > 0).map(([k, n]) => TAMPER[k](n));
+  return { results, corpus: s.corpus, perHook: s.perHook, isolation, sandboxOverheadMs, tmpDir: tmp, total, files, warnings };
 }

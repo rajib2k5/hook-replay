@@ -15,13 +15,13 @@ export function commandArgv(hook, vars = {}) {
   return [sub(hook.command), ...hook.args.map(sub)];
 }
 
-export function buildEnv({ source = process.env, tmp, projectDir, pluginRoot, envNames = [] }) {
+export function buildEnv({ source = process.env, work, projectDir, pluginRoot, envNames = [] }) {
   const env = {};
   for (const k of ENV_ALLOW) if (source[k] !== undefined) env[k] = source[k];
-  env.TMPDIR = path.join(tmp, 'tmp');
+  env.TMPDIR = path.join(work, 'tmp');
   env.CLAUDE_PROJECT_DIR = projectDir;
   if (pluginRoot !== undefined) env.CLAUDE_PLUGIN_ROOT = pluginRoot;
-  env.CLAUDE_PLUGIN_DATA = path.join(tmp, 'plugin-data');
+  env.CLAUDE_PLUGIN_DATA = path.join(work, 'plugin-data');
   env.CLAUDE_HOOK_REPLAY = '1';
   for (const k of envNames) if (source[k] !== undefined) env[k] = source[k];
   return env;
