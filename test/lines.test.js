@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { splitLines, readLines } from '../src/lines.js';
+import { splitLines, readLines, openSourceSync, SourceError } from '../src/lines.js';
+import { spawnSync } from 'node:child_process';
 
 const collect = async (gen) => { const out = []; for await (const x of gen) out.push(x); return out; };
 const tmpDir = (t) => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-lines-')); t.after(() => fs.rmSync(d, { recursive: true, force: true })); return d; };
@@ -59,4 +60,20 @@ test('huge lines: a 20 MiB line is over the 16 MiB default cap and a 5 MiB line 
   assert.deepEqual(got.map(l => [l.lineNo, l.offset, l.length, l.bytes === null ? null : l.bytes.length]),
     [[1, 0, 2, 2], [2, 3, big.length, null], [3, 4 + big.length, mid.length, mid.length],
       [4, 5 + big.length + mid.length, 7, 7]]);
+});
+
+// Round-6 review: the open alone (O_NONBLOCK) succeeds on a FIFO and on a directory; only the fstat check after it
+// refuses them. Removing that check failed no test.
+test('openSourceSync refuses a FIFO and a directory with SourceError, and opens a regular file', (t) => {
+  const d = tmpDir(t);
+  const fifo = path.join(d, 'fifo.jsonl');
+  const mk = spawnSync('mkfifo', [fifo]);
+  assert.equal(mk.status, 0, String(mk.stderr));
+  const dir = path.join(d, 'dir.jsonl');
+  fs.mkdirSync(dir);
+  for (const p of [fifo, dir]) assert.throws(() => openSourceSync(p), (e) => e instanceof SourceError && /not a regular file/.test(e.message), p);
+  const file = path.join(d, 'ok.jsonl');
+  fs.writeFileSync(file, 'x\n');
+  const fd = openSourceSync(file);
+  try { assert.ok(fs.fstatSync(fd).isFile()); } finally { fs.closeSync(fd); }
 });
