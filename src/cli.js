@@ -22,7 +22,7 @@ export const OPTIONS = {
   'project-dir': { type: 'string' }, 'plugin-root': { type: 'string' },
   timeout: { type: 'string' }, concurrency: { type: 'string' }, cwd: { type: 'string' },
   env: { type: 'string', multiple: true },
-  'allow-network': { type: 'boolean' }, 'writable-fs': { type: 'boolean' }, 'readonly-fs': { type: 'boolean' },
+  'allow-network': { type: 'boolean' }, 'writable-fs': { type: 'boolean' }, 'readonly-fs': { type: 'boolean' }, bwrap: { type: 'string' },
   'no-subagents': { type: 'boolean' },
   project: { type: 'string', multiple: true }, session: { type: 'string' },
   since: { type: 'string' }, until: { type: 'string' }, sample: { type: 'string' }, limit: { type: 'string' },
@@ -69,6 +69,7 @@ Execution:
   --writable-fs           let hooks write anywhere you can (default: read-only filesystem except the temp dir)
   --readonly-fs           deprecated, no effect: read-only is the default
   --allow-network         run hooks WITHOUT the sandbox (no isolation at all); report says NOT ISOLATED
+  --bwrap <path>          bwrap binary to use (default: the first root-owned one in /usr/bin, /bin, /usr/local/bin)
   --dry-run               count what would run, run nothing
 
 Output:
@@ -121,7 +122,7 @@ export function parseCli(argv) {
     timeoutS: v.timeout === undefined ? DEFAULT_TIMEOUT_S : Number(v.timeout),
     cwdMode: v.cwd ?? 'temp',
     envNames: v.env ?? [],
-    allowNetwork: !!v['allow-network'], writableFs: !!v['writable-fs'], readonlyFsAlias: !!v['readonly-fs'],
+    allowNetwork: !!v['allow-network'], writableFs: !!v['writable-fs'], readonlyFsAlias: !!v['readonly-fs'], bwrapBinary: v.bwrap,
     projectDir: path.resolve(v['project-dir'] ?? process.cwd()),
     pluginRoot: v['plugin-root'] === undefined ? undefined : path.resolve(v['plugin-root']),
     showRaw: !!v['show-raw'],

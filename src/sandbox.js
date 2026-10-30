@@ -176,7 +176,7 @@ export async function probe({ root, work, snap, writableFs = false, binary, filt
   }
 }
 
-// Resolves a command name on PATH once, so a hook cannot shadow it for later runs by writing to PATH.
+// Resolves a command name (python3 for the probe) on PATH once, so a hook cannot shadow it for later runs by writing to PATH.
 function which(cmd) {
   if (cmd.includes('/')) return cmd;
   for (const dir of (process.env.PATH || '').split(':')) {
@@ -186,16 +186,48 @@ function which(cmd) {
   return cmd;
 }
 
-export async function chooseIsolation({ allowNetwork = false, writableFs = false, root, work, snap, binary = 'bwrap', arch = process.arch, platform = process.platform }) {
-  if (allowNetwork) return { network: 'NOT ISOLATED', wrapper: null, readonly_fs: false, probe: 'not probed (--allow-network)', filter: null };
+// bwrap is taken from these root-owned system paths only, never from PATH (round-5 review, fake-bwrap: a fake bwrap
+// first on PATH, in ~/.local/bin, was accepted), or from --bwrap <path>. No probe can tell a malicious wrapper from
+// bwrap: one that prints the answers the probe expects and then runs the hook unwrapped passes every check.
+export const SYSTEM_BWRAP = ['/usr/bin/bwrap', '/bin/bwrap', '/usr/local/bin/bwrap'];
+
+// The real path of the first candidate that is a regular file owned by root and not writable by group or others, in
+// a directory with the same two properties (the real path, so a link cannot be repointed after the check), or null.
+// Returns {binary, rejected: ['<candidate>: <why>', ...]}.
+export function resolveBwrap(candidates = SYSTEM_BWRAP) {
+  const rejected = [];
+  const faults = (what, p, st) => [st.uid !== 0 && `${what} ${p} owned by uid ${st.uid}`, (st.mode & 0o022) && `${what} ${p} writable by group or others`];
+  for (const c of candidates) {
+    let why;
+    try {
+      const real = fs.realpathSync(c);
+      const st = fs.statSync(real);
+      const dir = path.dirname(real);
+      why = [!st.isFile() && `${real} is not a regular file`, ...faults('file', real, st), ...faults('directory', dir, fs.statSync(dir))].filter(Boolean);
+      if (!why.length) return { binary: real, rejected };
+    } catch (e) { why = [e.code ?? e.message]; }
+    rejected.push(`${c}: ${why.join('; ')}`);
+  }
+  return { binary: null, rejected };
+}
+
+// `binary` is the --bwrap override, used as given; without it, resolveBwrap() picks a system path.
+export async function chooseIsolation({ allowNetwork = false, writableFs = false, root, work, snap, binary, arch = process.arch, platform = process.platform }) {
+  if (allowNetwork) return { network: 'NOT ISOLATED', wrapper: null, readonly_fs: false, probe: 'not probed (--allow-network)', filter: null, bwrap: null };
   const unavailable = (why) => new IsolationError(`no isolation available (${why}); pass --allow-network to run without it`);
   if (platform !== 'linux') throw unavailable(`isolation needs Linux bwrap, this is ${platform}`);
   const filter = seccompFilter(arch);
   if (!filter) throw unavailable(`no seccomp program for architecture ${arch}`);
-  const bin = which(binary);
-  const r = await probe({ root, work, snap, writableFs, binary: bin, filter });
-  if (!r.ok) throw unavailable(r.reason);
-  return { network: 'bwrap', wrapper: 'bwrap', binary: bin, readonly_fs: !writableFs, probe: r.reason, filter };
+  let bwrap;
+  if (binary !== undefined) bwrap = { path: path.resolve(binary), from: '--bwrap' };
+  else {
+    const { binary: found, rejected } = resolveBwrap();
+    if (!found) throw unavailable(`no root-owned bwrap that only root can write in ${SYSTEM_BWRAP.join(', ')} (${rejected.join('; ')}); give one with --bwrap <path>`);
+    bwrap = { path: found, from: 'system path' };
+  }
+  const r = await probe({ root, work, snap, writableFs, binary: bwrap.path, filter });
+  if (!r.ok) throw unavailable(`${bwrap.path}: ${r.reason}`);
+  return { network: 'bwrap', wrapper: 'bwrap', binary: bwrap.path, bwrap, readonly_fs: !writableFs, probe: r.reason, filter };
 }
 
 // Latency of `true`, 20 runs unwrapped and 20 wrapped, reported as two distributions. Differences of percentiles

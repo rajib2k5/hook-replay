@@ -12,6 +12,7 @@ import { replay } from '../src/replay.js';
 import { hookFromFlags } from '../src/hooks.js';
 import { probe, wrapperArgv, chooseIsolation, seccompFilter, hostAddress, hostAddress6, hookBinds, measureOverhead, IsolationError } from '../src/sandbox.js';
 import { program, encode, ARCHES } from '../src/seccomp.js';
+import { runHook } from '../src/runner.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -478,4 +479,21 @@ test('(e) io_uring_setup fails with ENOSYS inside the sandbox; unwrapped it does
   assert.doesNotMatch(control, / 38$/, `control: unwrapped io_uring_setup gave ${control}`);
   const res = await runOne({ hook: IO_URING });
   assert.equal(res.results[0].run.stdout.trim(), '-1 38', res.results[0].run.stderr);
+});
+
+// Round-5 review (partial.mjs): a filter that denies only the families the probe tries passes the probe. The shipped
+// filter denies socket() whatever the family: uncommon ones, creatable unwrapped or not, must be EACCES inside.
+const UNCOMMON = `import socket, errno, json
+out = {}
+for name, args in {'AF_VSOCK': (40, 1, 0), 'AF_ALG': (38, 5, 0), 'AF_CAN': (29, 3, 1)}.items():
+    try:
+        socket.socket(*args).close(); out[name] = 'created'
+    except OSError as e:
+        out[name] = errno.errorcode.get(e.errno, str(e.errno))
+print(json.dumps(out))`;
+test('(e) the shipped filter makes socket() EACCES for AF_VSOCK, AF_ALG and AF_CAN too', { skip: skip || (!hasPython && 'python3 is not installed') }, async (t) => {
+  const work = tmpDir(t);
+  const r = await runHook({ argv: wrapperArgv('bwrap', ['python3', '-c', UNCOMMON], { work }), stdin: '', env: { PATH: process.env.PATH }, cwd: work,
+    timeoutMs: 10000, timeoutSource: 'replay_cap', extraInput: [seccompFilter()] });
+  assert.deepEqual(JSON.parse(r.stdout), { AF_VSOCK: 'EACCES', AF_ALG: 'EACCES', AF_CAN: 'EACCES' }, r.stderr);
 });

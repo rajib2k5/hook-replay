@@ -54,7 +54,7 @@ export async function replay(opts) {
     projectsDir, hooks, filters = {}, includeSubagents = true, maxLineBytes, limit = 5000, homedir = os.homedir(),
     concurrency = 4, timeoutS = DEFAULT_TIMEOUT_S, cwdMode = 'temp', envNames = [], allowNetwork = false,
     projectDir = process.cwd(), pluginRoot, env: envSource = process.env, stderr = process.stderr, redact = makeRedactor(),
-    writableFs = false, bwrapBinary = 'bwrap',
+    writableFs = false, bwrapBinary,
   } = opts;
   const files = discover(projectsDir).filter(f => keepFile(f, filters) && (!filters.fileFilter || filters.fileFilter(f)));
   const s = await scan({ files, hooks, filters, includeSubagents, maxLineBytes, homedir, limit });
