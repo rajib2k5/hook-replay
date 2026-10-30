@@ -121,7 +121,8 @@ All three are exported as env vars; in exec form (`args` set) they are also subs
 
 ## 5. Execution
 
-**Command.** Shell form: `sh -c <command>`. Exec form:
+**Command.** Shell form: `sh -c <command>`, or `bash -c <command>` when the settings hook sets `"shell": "bash"`
+(`"powershell"` and any other value are skipped with a warning; `shell` is ignored when `args` is set). Exec form:
 `command` resolved on PATH, `args` as argv. Wrapped (bwrap only; `unshare` was rejected after review, see ADR-0001):
 - `bwrap --dev-bind / / --proc /proc --unshare-all --new-session --die-with-parent --seccomp 3 -- <argv>`;
   with `--readonly-fs`: `bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp [--ro-bind <f> <f>]...

@@ -9,7 +9,7 @@ export const DEFAULT_HOOK_TIMEOUT_S = 600;
 export class UsageError extends Error {}
 
 const hookKey = (h) => crypto.createHash('sha256')
-  .update(JSON.stringify([h.event, h.matcher ?? null, h.command, h.args ?? null])).digest('hex').slice(0, 16);
+  .update(JSON.stringify([h.event, h.matcher ?? null, h.command, h.args ?? null, ...(h.shell ? [h.shell] : [])])).digest('hex').slice(0, 16);
 
 export function hookFromFlags({ hook, event, matcher, hookTimeout, onFailure }) {
   if (!EVENTS.includes(event)) throw new UsageError(`--event must be one of ${EVENTS.join(', ')}`);
@@ -59,9 +59,11 @@ export function loadSettings(file, { ignoreIf = false, pluginRoot } = {}) {
         const skip = (why) => warnings.push(`skipped ${source}: ${why}`);
         if (!x || x.type !== 'command') return skip(`type ${JSON.stringify(x && x.type)} is not command`);
         if (x.async || x.asyncRewake) return skip('async hooks are not replayed');
-        if (x.shell === 'powershell') return skip('shell powershell is not supported');
-        if (typeof x.command !== 'string' || x.command === '') return skip('no command');
         const args = Array.isArray(x.args) ? x.args.map(String) : undefined;
+        // "shell" accepts "bash" or "powershell" and is ignored when args is set (hooks reference).
+        if (!args && x.shell === 'powershell') return skip('shell powershell is not supported');
+        if (!args && x.shell !== undefined && x.shell !== 'bash') return skip(`shell ${JSON.stringify(x.shell)} is not supported`);
+        if (typeof x.command !== 'string' || x.command === '') return skip('no command');
         if ([x.command, ...(args || [])].some(s => s.includes('${user_config.'))) return skip('references ${user_config.*}');
         if (x.if !== undefined && !ignoreIf) throw new UsageError(`${source} has an "if" field, which replay cannot evaluate; pass --ignore-if to run it on every matcher hit`);
         const timeoutS = x.timeout === undefined ? DEFAULT_HOOK_TIMEOUT_S : Number(x.timeout);
@@ -69,6 +71,7 @@ export function loadSettings(file, { ignoreIf = false, pluginRoot } = {}) {
         const onFailure = x.onFailure ?? 'continue';
         if (!['continue', 'block'].includes(onFailure)) throw new UsageError(`${source}: onFailure must be continue or block`);
         const h = { id: `h${hooks.length + 1}`, event, matcher, command: x.command, args, timeoutS, onFailure, source, ifIgnored: x.if !== undefined };
+        if (!args && x.shell === 'bash') h.shell = 'bash';
         h.key = hookKey(h);
         checkPluginRoot(h, pluginRoot);
         hooks.push(h);

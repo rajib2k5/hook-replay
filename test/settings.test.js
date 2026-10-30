@@ -71,3 +71,29 @@ test('exec form substitutes the three placeholders in command and args; shell fo
     ['/plug/bin/run', '--dir', '/proj/x', '/data']);
   assert.deepEqual(commandArgv({ command: 'echo ${CLAUDE_PROJECT_DIR}' }, vars), ['sh', '-c', 'echo ${CLAUDE_PROJECT_DIR}']);
 });
+
+test('"shell": "bash" runs the command with bash -c, so bash syntax works and exit 2 blocks', async (t) => {
+  const { replay } = await import('../src/replay.js');
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const f = write(t, { hooks: { PreToolUse: [{ hooks: [
+    { type: 'command', command: '[[ 1 == 1 ]] && { echo bash-said-no >&2; exit 2; }', shell: 'bash' },
+    { type: 'command', command: '[[ 1 == 1 ]] && exit 2' },
+  ] }] } });
+  const { hooks } = loadSettings(f, {});
+  assert.deepEqual(commandArgv(hooks[0]), ['bash', '-c', '[[ 1 == 1 ]] && { echo bash-said-no >&2; exit 2; }']);
+  const res = await replay({ projectsDir: path.join(here, 'fixtures/projects'), hooks, allowNetwork: true, stderr: { write() {} },
+    filters: { fileFilter: (x) => x.sessionUuid === 'cccccccc-0000-4000-8000-000000000003' } });
+  const by = Object.fromEntries(res.results.map(r => [r.hookId, [r.verdict.outcome, r.verdict.mechanism, r.verdict.reason]]));
+  assert.deepEqual(by.h1, ['block', 'exit2', 'bash-said-no']);
+  assert.equal(by.h2[1], 'exit_127', 'control: sh (dash) has no [[');
+});
+
+test('"shell" is ignored with args (exec form), and an unknown shell is skipped with a warning', (t) => {
+  const f = write(t, { hooks: { Stop: [{ hooks: [
+    { type: 'command', command: 'node', args: ['x.js'], shell: 'bash' },
+    { type: 'command', command: 'true', shell: 'zsh' },
+  ] }] } });
+  const { hooks, warnings } = loadSettings(f, {});
+  assert.deepEqual(hooks.map(h => commandArgv(h)), [['node', 'x.js']]);
+  assert.ok(warnings.some(w => /shell "zsh" is not supported/.test(w)), warnings.join('\n'));
+});
