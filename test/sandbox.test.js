@@ -347,3 +347,18 @@ test('probe reason states what was measured', { skip }, async (t) => {
   assert.match(r.reason, /socket\(\) EACCES inside for unix, tcp 127\.0\.0\.1/);
   assert.match(r.reason, /all connected unwrapped/);
 });
+
+// io_uring_setup is closed by the seccomp rule, not only by bytes: IORING_OP_SOCKET would make a socket without
+// socket(). The x32 and arch-kill rules are verified only by bytes on an aarch64 host (DESIGN.md §5).
+const hasPython = !spawnSync('python3', ['-c', '0']).error;
+const IO_URING = `python3 -c "import ctypes,os
+nr={'aarch64':425,'x86_64':425}[os.uname().machine]
+libc=ctypes.CDLL(None,use_errno=True)
+r=libc.syscall(nr,8,ctypes.create_string_buffer(120))
+print(r, ctypes.get_errno())"`;
+test('(e) io_uring_setup fails with ENOSYS inside the sandbox; unwrapped it does not', { skip: skip || (!hasPython && 'python3 is not installed') }, async () => {
+  const control = await direct(IO_URING);
+  assert.doesNotMatch(control, / 38$/, `control: unwrapped io_uring_setup gave ${control}`);
+  const res = await runOne({ hook: IO_URING });
+  assert.equal(res.results[0].run.stdout.trim(), '-1 38', res.results[0].run.stderr);
+});
