@@ -1,0 +1,8 @@
+{"parentUuid":null,"isSidechain":false,"userType":"external","cwd":"/home/fixture/proj","sessionId":"cccccccc-0000-4000-8000-000000000003","version":"2.1.300","gitBranch":"main","type":"user","message":{"role":"user","content":"hi"},"uuid":"c-u-0001","timestamp":"2026-10-03T08:00:00.000Z"}
+{not json
+[1,2,3]
+"just a string"
+{"type":"mystery-type","uuid":"c-x-0001","timestamp":"2026-10-03T08:00:00.500Z"}
+{"parentUuid":"c-u-0001","isSidechain":false,"userType":"external","cwd":"/home/fixture/proj","sessionId":"cccccccc-0000-4000-8000-000000000003","version":"2.1.300","gitBranch":"main","type":"assistant","message":{"id":"msg_C1","role":"assistant","model":"claude-fixture","content":[{"type":"tool_use","id":"toolu_C01","name":"Bash","input":{"command":"rm -rf node_modules"}}],"stop_reason":"tool_use","usage":{"input_tokens":1,"output_tokens":1}},"uuid":"c-a-0001","timestamp":"2026-10-03T08:00:01.000Z"}
+{"parentUuid":"c-a-0001","isSidechain":false,"userType":"external","cwd":"/home/fixture/proj","sessionId":"cccccccc-0000-4000-8000-000000000003","version":"2.1.300","gitBranch":"main","type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_C01","type":"tool_result","content":""}]},"uuid":"c-u-0002","timestamp":"2026-10-03T08:00:02.000Z"}
+{"parentUuid":"c-u-0002","isSidechain":false,"userType":"external","cwd":"/home/fixture/proj","sessionId":"cccccccc-0000-4000-8000-000000000003","version":"2.1.300","gitBranch":"main","type":"assistant","message":{"id":"msg_C2","role":"assistant","model":"claude-fixture","content":[{"type":"tool_use","id":"toolu_C02","name":"Bash","input":{"command":"rm -rf /"}}],"stop_reason":"tool_use"},"uuid":"c-a-0002","timestamp":"2026-10-03T08:00:03.000Z"}
