@@ -8,18 +8,14 @@ import { scan, filePoints, toolOf } from './scan.js';
 import { Snapshot } from './snapshot.js';
 import { runHook, buildEnv, commandArgv } from './runner.js';
 import { classify } from './classify.js';
+import { chooseIsolation, wrapperArgv, measureOverhead, IsolationError } from './sandbox.js';
+
+export { IsolationError };
 
 export const DEFAULT_TIMEOUT_S = 10;
 
-export class IsolationError extends Error {}
-
 export function effectiveTimeout(hookTimeoutS, capS) {
   return hookTimeoutS <= capS ? { seconds: hookTimeoutS, source: 'hook' } : { seconds: capS, source: 'replay_cap' };
-}
-
-export async function chooseIsolation({ allowNetwork }) {
-  if (allowNetwork) return { network: 'NOT ISOLATED', wrapper: null, probe: 'skipped: no wrapper in this build' };
-  throw new IsolationError('no network isolation available; pass --allow-network to run unisolated');
 }
 
 function makeTmp() {
@@ -42,18 +38,27 @@ export async function replay(opts) {
     projectsDir, hooks, filters = {}, includeSubagents = true, maxLineBytes, limit = 5000, homedir = os.homedir(),
     concurrency = 4, timeoutS = DEFAULT_TIMEOUT_S, cwdMode = 'temp', envNames = [], allowNetwork = false,
     projectDir = process.cwd(), pluginRoot, env: envSource = process.env, stderr = process.stderr,
+    readonlyFs = false, wrappers = ['unshare', 'bwrap'],
   } = opts;
   const files = discover(projectsDir).filter(f => !filters.fileFilter || filters.fileFilter(f));
   const s = await scan({ files, hooks, filters, includeSubagents, maxLineBytes, homedir, limit });
-  const isolation = await chooseIsolation({ allowNetwork });
+  const tmp = makeTmp();
+  const cleanup = () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } };
+  let isolation;
+  let sandboxOverheadMs;
+  try {
+    isolation = await chooseIsolation({ allowNetwork, readonlyFs, tmp, candidates: wrappers });
+    sandboxOverheadMs = await measureOverhead(isolation, { tmp });
+  } catch (e) {
+    cleanup();
+    throw e;
+  }
   const total = Object.values(s.perHook).reduce((a, h) => a + h.points, 0);
   for (const h of hooks) {
     stderr.write(`hook-replay: ${h.id} ${h.command}\n  ${s.perHook[h.id].points} points, isolation ${isolation.network}, cwd ${cwdMode}\n` +
       `  replay EXECUTES this hook ${s.perHook[h.id].points} times; a hook with side effects will perform them ${s.perHook[h.id].points} times\n`);
   }
 
-  const tmp = makeTmp();
-  const cleanup = () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } };
   const onSignal = (sig) => { cleanup(); process.kill(process.pid, sig); };
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
@@ -80,7 +85,8 @@ export async function replay(opts) {
             if (cwdMode === 'recorded' && typeof p.payload.cwd === 'string') {
               try { if (fs.statSync(p.payload.cwd).isDirectory()) cwd = p.payload.cwd; } catch { /* keep temp cwd */ }
             }
-            const run = await runHook({ argv: commandArgv(hook), stdin, env, cwd, timeoutMs: t.seconds * 1000, timeoutSource: t.source,
+            const argv = wrapperArgv(isolation.wrapper, commandArgv(hook), { readonlyFs: isolation.readonly_fs, tmp });
+            const run = await runHook({ argv, stdin, env, cwd, timeoutMs: t.seconds * 1000, timeoutSource: t.source,
               killGroup: !isolation.wrapper });
             snap.afterRun();
             const verdict = classify(run, hook);
@@ -102,5 +108,5 @@ export async function replay(opts) {
   const hookOrder = Object.fromEntries(hooks.map((h, i) => [h.id, i]));
   results.sort((a, b) => Buffer.compare(Buffer.from(a.file), Buffer.from(b.file)) || a.lineNo - b.lineNo ||
     hookOrder[a.hookId] - hookOrder[b.hookId] || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-  return { results, corpus: s.corpus, perHook: s.perHook, isolation, tmpDir: tmp, total, files };
+  return { results, corpus: s.corpus, perHook: s.perHook, isolation, sandboxOverheadMs, tmpDir: tmp, total, files };
 }
