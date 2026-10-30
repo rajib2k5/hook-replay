@@ -6,7 +6,7 @@ import path from 'node:path';
 import { discover } from './corpus.js';
 import { scan, filePoints, toolOf } from './scan.js';
 import { Snapshot } from './snapshot.js';
-import { runHook, buildEnv, commandArgv } from './runner.js';
+import { runHook, buildEnv, commandArgv, killRunning } from './runner.js';
 import { classify } from './classify.js';
 import { keepFile } from './filters.js';
 import { chooseIsolation, wrapperArgv, hookBinds, measureOverhead, IsolationError } from './sandbox.js';
@@ -14,6 +14,7 @@ import { chooseIsolation, wrapperArgv, hookBinds, measureOverhead, IsolationErro
 export { IsolationError };
 
 export const DEFAULT_TIMEOUT_S = 10;
+const SIGNAL_EXIT = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
 
 export function effectiveTimeout(hookTimeoutS, capS) {
   return hookTimeoutS <= capS ? { seconds: hookTimeoutS, source: 'hook' } : { seconds: capS, source: 'replay_cap' };
@@ -44,13 +45,30 @@ export async function replay(opts) {
   const files = discover(projectsDir).filter(f => keepFile(f, filters) && (!filters.fileFilter || filters.fileFilter(f)));
   const s = await scan({ files, hooks, filters, includeSubagents, maxLineBytes, homedir, limit });
   const tmp = makeTmp();
-  const cleanup = () => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* best effort */ } };
+  // Kill what still runs before removing the root: a live hook can recreate files in it.
+  const cleanup = () => {
+    killRunning();
+    try { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ }
+  };
+  // Installed before the probe, which already spawns sandboxes. On a signal: kill, remove, exit 128+N.
+  const handlers = Object.entries(SIGNAL_EXIT).map(([sig, code]) => [sig, () => {
+    cleanup();
+    try { stderr.write(`hook-replay: ${sig}: stopped, hooks killed, temp files removed\n`); } catch { /* closed */ }
+    process.exit(code);
+  }]);
+  for (const [sig, h] of handlers) process.on(sig, h);
+  process.on('exit', cleanup);
+  const unhook = () => {
+    for (const [sig, h] of handlers) process.removeListener(sig, h);
+    process.removeListener('exit', cleanup);
+  };
   let isolation;
   let sandboxOverheadMs;
   try {
     isolation = await chooseIsolation({ allowNetwork, readonlyFs, tmp, binary: bwrapBinary });
     sandboxOverheadMs = await measureOverhead(isolation, { tmp });
   } catch (e) {
+    unhook();
     cleanup();
     throw e;
   }
@@ -60,10 +78,6 @@ export async function replay(opts) {
       `  replay EXECUTES this hook ${s.perHook[h.id].points} times; a hook with side effects will perform them ${s.perHook[h.id].points} times\n`);
   }
 
-  const onSignal = (sig) => { cleanup(); process.kill(process.pid, sig); };
-  process.once('SIGINT', onSignal);
-  process.once('SIGTERM', onSignal);
-  process.once('exit', cleanup);
   const env = buildEnv({ source: envSource, tmp, projectDir, pluginRoot, envNames });
   const byId = Object.fromEntries(hooks.map(h => [h.id, h]));
   const results = [];
@@ -103,9 +117,7 @@ export async function replay(opts) {
       }
     });
   } finally {
-    process.removeListener('SIGINT', onSignal);
-    process.removeListener('SIGTERM', onSignal);
-    process.removeListener('exit', cleanup);
+    unhook();
     cleanup();
   }
   const hookOrder = Object.fromEntries(hooks.map((h, i) => [h.id, i]));

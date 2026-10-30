@@ -169,7 +169,10 @@ source file (bytes, never re-serialised; oversize lines included); if `snapshotE
 released late), `ftruncate` to `snapshotEnd`. After each run, if its size ≠ `snapshotEnd` (the hook changed it),
 recreate it from source. Kept as recorded, including earlier `stop_hook_summary` and hook
 attachment lines, because that is what a hook at that point could have seen; lines written after the point are
-not present. Delete each snapshot when its transcript finishes; remove `<tmp>` on exit, SIGINT, SIGTERM.
+not present. Delete each snapshot when its transcript finishes; remove `<tmp>` on exit. The signal handlers are
+installed as soon as `<tmp>` exists (before the probe, which already spawns sandboxes): on SIGINT, SIGTERM or
+SIGHUP, kill every running hook's process group, remove `<tmp>`, and exit 130, 143 or 129. SIGKILL cannot be
+handled: `<tmp>` then survives (§9).
 Peak disk ≈ concurrency × largest transcript (≈ 4 × 6.6 MB here).
 
 **Dry run** reconstructs, filters, matches, prints counts per hook × tool, runs nothing. **Banner** (stderr,
@@ -259,7 +262,8 @@ matcher, command, source, if_ignored, runs, truncated, counts{<outcome>:n}, by_t
 mechanisms{<mechanism>:n}, flagged_real_ok, latency_ms{n,p50,p95,max}, samples[]}]`.
 
 **Exit codes.** 0 report produced · 1 internal failure · 2 usage/load error · 3 isolation unavailable without
-`--allow-network` · 4 `--fail-on <outcome,...>` matched at least once.
+`--allow-network` · 4 `--fail-on <outcome,...>` matched at least once · 130 / 143 / 129 stopped by SIGINT / SIGTERM /
+SIGHUP (hooks killed, temp files removed, no report).
 
 ## 8. Redaction
 
@@ -291,7 +295,7 @@ escapes). Redaction is best-effort pattern matching, and the README says so.
 |---|---|---|
 | Hook exfiltrates transcript data | bwrap namespaces + seccomp `socket()` → `EACCES` (no TCP/UDP, no filesystem or abstract Unix sockets, no io_uring), verified by a probe that tries to connect out; `SSH_AUTH_SOCK` is scrubbed | a hook can still write what it read into a file (see next row) for a later process to send; with `--allow-network` nothing is isolated; non-Linux and architectures other than aarch64/x86_64 have no isolation at all |
 | Hook side effects × N (writes, deletes, logs) | banner, `--dry-run`, temp cwd, `CLAUDE_HOOK_REPLAY=1`, `--readonly-fs` | without `--readonly-fs` the hook can write anywhere the user can, N times (including files such as `~/.bashrc` or `~/.config/systemd/user/` that something outside the sandbox runs later). Same trust as enabling it, but N× the exposure |
-| Daemonising / fork-bomb hook | pid namespace killed on timeout; process group killed unwrapped | CPU, memory and process count are not limited in v0.1; unwrapped (`--allow-network`) a `setsid` child survives |
+| Daemonising / fork-bomb hook | pid namespace killed on timeout; process group killed unwrapped; running hooks killed on SIGINT/SIGTERM/SIGHUP | CPU, memory and process count are not limited in v0.1; unwrapped (`--allow-network`) a `setsid` child survives |
 | Output bomb | 1 MiB caps | — |
 | Transcript text as terminal escapes | control-char escaping | — |
 | Secrets in report | §8 redaction, 0600 `--out` | pattern misses; raw prefixes sit in 0700 temp during the run and survive SIGKILL of hook-replay |
