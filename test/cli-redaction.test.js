@@ -193,3 +193,25 @@ for (const mode of ['table', 'json']) {
     for (const v of R3_PLANTED) assert.ok(raw.stdout.includes(v), `--show-raw ${mode} output lacks ${v}`);
   });
 }
+
+test('an uncaught exception prints one redacted line (exit 1), not Node\'s raw stack; the stack only with HOOK_REPLAY_DEBUG=1', (t) => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-crash-'));
+  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  // Throws from outside main()'s promise chain, after the first stderr write; the Error is made inside src/, so a
+  // raw stack would name the install path.
+  const boom = path.join(d, 'boom.mjs');
+  fs.writeFileSync(boom, `import os from 'node:os';
+const w = process.stderr.write.bind(process.stderr); let armed = true;
+process.stderr.write = (...a) => { if (armed) { armed = false; const e = new Error('EBOOM ' + os.homedir() + '/x api_key=r3CrashKey8850');
+  setImmediate(() => { throw e; }); } return w(...a); };\n`);
+  const args = ['--import', `file://${boom}`, path.join(root, 'bin/hook-replay.js'), '--hook', 'true', '--event', 'PreToolUse', '--dry-run',
+    '--projects-dir', path.join(here, 'fixtures/projects')];
+  const r = spawnSync(process.execPath, args, { encoding: 'utf8', cwd: root, env: { ...process.env, HOOK_REPLAY_DEBUG: '' } });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /\nhook-replay: internal error: EBOOM ~\/x api_key=\[REDACTED:value\]\n$/);
+  for (const v of ['r3CrashKey8850', os.homedir(), root, '    at ']) assert.ok(!r.stderr.includes(v), `stderr contains ${v}`);
+  const dbg = spawnSync(process.execPath, args, { encoding: 'utf8', cwd: root, env: { ...process.env, HOOK_REPLAY_DEBUG: '1' } });
+  assert.equal(dbg.status, 1);
+  assert.match(dbg.stderr, /\n    at /);
+  for (const v of ['r3CrashKey8850', os.homedir()]) assert.ok(!dbg.stderr.includes(v), `debug stderr contains ${v}`);
+});
