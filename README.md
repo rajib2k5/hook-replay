@@ -19,7 +19,7 @@ node bin/hook-replay.js --hook 'node "$CLAUDE_PROJECT_DIR/examples/hooks/deny-rm
   --event PreToolUse --matcher Bash --projects-dir test/fixtures/projects
 ```
 
-Each hook runs in an empty temporary directory, not in your project. A relative script path does not work: if the path exists from your current directory, hook-replay stops with a usage error (exit 2). Use an absolute path or `$CLAUDE_PROJECT_DIR`. The variable holds the value of `--project-dir`. The default is the current directory.
+Each hook runs in an empty temporary directory, not in your project. A relative script path does not work: if the path exists from your current directory, hook-replay stops with a usage error (exit 2). This check also looks past `NAME=value` prefixes and an `env` prefix (`FOO=1 node x.js`, `/usr/bin/env node x.js`). It does not look inside `sh -c '...'`. Use an absolute path or `$CLAUDE_PROJECT_DIR`. The variable holds the value of `--project-dir`. The default is the current directory.
 
 Other ways to run:
 
@@ -91,10 +91,10 @@ Each run goes through `bwrap` with these settings:
 - New user, network, pid, ipc, uts, and cgroup namespaces (`--unshare-all`).
 - A seccomp filter. `socket()` fails with `EACCES` for every address family. This also closes Unix sockets such as docker and D-Bus. `io_uring_setup()` fails with `ENOSYS`.
 - `--new-session` and `--die-with-parent`.
-- A temporary working directory.
+- A temporary working directory, `<root>/work/cwd`. The temporary root has two parts: `<root>/snap` holds the transcript snapshots and is read-only for the hook; `<root>/work` (working directory, `TMPDIR`, `CLAUDE_PLUGIN_DATA`) is the only part the hook can write.
 - A small environment: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `LANG`, `LC_ALL`, `LC_CTYPE`, `TZ`, the `CLAUDE_*` placeholders, `CLAUDE_HOOK_REPLAY=1`, and each name you give with `--env`.
 
-At start, hook-replay does a probe. The probe tries to connect out of the sandbox with a Unix socket and with TCP. If any attempt works, hook-replay exits with code 3. A hook that needs a socket shows as `error` in the report.
+At start, hook-replay does a probe (see "Safety and privacy" for the exact checks). If a check fails, hook-replay exits with code 3. A hook that needs a socket shows as `error` in the report.
 
 ### Classification
 
@@ -139,11 +139,16 @@ Use `--fail-on block,ask` to get exit code 4 when any of these outcomes occurred
 
 CAUTION: Replay EXECUTES the hook once for each matching call. A hook with side effects repeats them N times. Run `--dry-run` first to see N.
 
-- By default, the file system is read-only for the hook, except the temporary directory. The hook gets its own `/dev` (no access to your terminals in `/dev/pts`, its own `/dev/shm`), an empty `/tmp`, and an empty `/run/user/<uid>` (no D-Bus or other session sockets). A hook script under `/tmp` is made visible, read-only.
-- `--writable-fs` lets the hook write anywhere that you can write, N times. This includes files such as `~/.claude/settings.json` or `~/.bashrc` that run later outside the sandbox. hook-replay prints a warning. The hook still gets its own `/dev` and an empty `/run/user/<uid>`.
+- By default, the hook can write only in `<root>/work` (its working directory, `TMPDIR` and `CLAUDE_PLUGIN_DATA`), and in FIFOs (see the residual risks). The rest of the file system is read-only for the hook. This includes `<root>/snap`, where the transcript snapshots are: hook-replay opens those files outside the sandbox, so the hook cannot create, link, or replace entries there. hook-replay creates its files with `O_EXCL|O_NOFOLLOW` and does not follow a link that it finds. The hook gets its own `/dev` (no access to your terminals in `/dev/pts`, its own `/dev/shm`), an empty `/tmp`, and an empty `/run/user/<uid>` (no D-Bus or other session sockets). A hook script under `/tmp` is made visible, read-only.
+- `--writable-fs` lets the hook write anywhere that you can write, N times, except `<root>/snap`, which stays read-only. This includes files such as `~/.claude/settings.json` or `~/.bashrc` that run later outside the sandbox. hook-replay prints a warning. The hook still gets its own `/dev` and an empty `/run/user/<uid>`.
+- `--allow-network` runs the hook without the sandbox. The hook can then write `<root>/snap` too, as it can write any of your files. hook-replay still does not follow a link that the hook puts there: it uses a new name and adds a warning to the report. A run whose snapshot the hook changed gets the fidelity flag `snapshot_tampered`.
 - `--readonly-fs` is deprecated. It has no effect, because read-only is the default.
-- The sandbox needs `bwrap`. At start, a probe checks that `socket()` fails with `EACCES` inside the sandbox for a Unix socket and for TCP, and that the same connections succeed without the sandbox. If the probe fails, hook-replay stops with exit code 3.
-- Redaction is on by default. It is best-effort pattern matching. It can miss a secret. It can also hide text that is not a secret (see the path above). The kinds are: private keys (also a key cut short without its END line), API keys, GitHub, GitLab, npm, and Hugging Face tokens, AWS keys, Slack tokens, Google keys, JWTs, `Authorization` values with any scheme (`Bearer`, `Basic`, `Digest`, ...), `Cookie` and `Set-Cookie` values, values of names such as `password`, `api_key`, `DB_PASS`, `MYSQL_PWD`, `AccountKey` or `SharedAccessKey`, the whole value of a JSON key with such a name (also a number or a nested object), `curl -u user:password`, `sshpass -p`, URL credentials and URL parameters such as `token=`, `api_key=` or `sig=`, email addresses, home paths, your user name, and long high-entropy strings. A path is not one high-entropy string: `/` splits it.
+- The sandbox needs `bwrap`. At start, a probe runs these checks with the exact wrapper and seccomp filter. If one fails, hook-replay stops with exit code 3.
+  1. The wrapper exits 0 for `true`.
+  2. Inside the sandbox, each of these fails with `EACCES`: connect to a Unix socket in `<root>/work`; TCP connect to `127.0.0.1`, to `::1`, to the first non-loopback IPv4 address, and to the first global or ULA IPv6 address of the host (each if the host has it); open an `AF_NETLINK` socket. If `python3` is on `PATH`, also `AF_PACKET`, raw IPv4, and raw IPv6 sockets.
+  3. Inside the sandbox, `/proc/self/ns/net` and `/proc/self/ns/pid` are different from those of hook-replay.
+  4. Without the sandbox, the same client connects to each target that has a listener.
+- Redaction is on by default. It is best-effort pattern matching. It can miss a secret. It can also hide text that is not a secret (see the path above). The kinds are: private keys (also a key cut short without its END line), Anthropic, OpenAI, and Stripe API keys, GitHub, GitLab, npm, and Hugging Face tokens, AWS keys, Slack tokens, Google keys, JWTs, `Authorization` values with any scheme (`Bearer`, `Basic`, `Digest`, ...), `Cookie` and `Set-Cookie` values, values of names such as `password`, `api_key`, `DB_PASS`, `MYSQL_PWD`, `OPENAI_KEY` (any upper-case `*_KEY`), `AccountKey` or `SharedAccessKey`, a bare `pwd=` (not `PWD=/path`), the whole value of a JSON key with such a name (a string, an array, or an object), the `value` next to a `name` or `key` that holds such a name (`{"name": "API_KEY", "value": ...}`, also in YAML), the item after `--token`, `--password` and similar flags (also in an argv array), the password in a `.netrc` entry, `curl -u user:password`, `sshpass -p`, `docker login -p`, URL credentials and URL parameters such as `token=`, `api_key=` or `sig=`, hex strings after a key or header name, email addresses, home paths, your user name, and long high-entropy strings. A path is not one high-entropy string: `/` splits it. A number or `true`/`false` after such a name stays (`max_tokens: 4096`, `PASSWORD_MIN_LENGTH=8`), unless the name ends in the secret word (`PASSWORD=1234` is redacted). A `session_id` stays.
 - `--show-raw` turns redaction off. The report then holds raw transcript text.
 - Temporary files have mode 0600 for files and 0700 for directories. hook-replay removes them on exit and on SIGINT, SIGTERM, and SIGHUP.
 - Nothing leaves your machine. hook-replay has no telemetry and no upload.
@@ -151,8 +156,8 @@ CAUTION: Replay EXECUTES the hook once for each matching call. A hook with side 
 
 Residual risks (DESIGN section 9):
 
-- A hook can write data that it read into the temporary directory, or with `--writable-fs` into any file. A process outside the sandbox can send that file later.
-- The file system is read-only, but a FIFO (named pipe) stays writable on a read-only mount. A hook can write into a FIFO anywhere under your home directory or elsewhere outside `/tmp` and `/run/user/<uid>`, if a process outside the sandbox reads it.
+- A hook can write data that it read into `<root>/work`, or with `--writable-fs` into any file. A process outside the sandbox can send that file later.
+- The file system is read-only, but the kernel does not apply the read-only check to a FIFO (named pipe). A hook can write into any FIFO that you can write outside `/tmp`, `/dev`, and `/run/user/<uid>`, for example one under your home directory or under `/var/tmp` (both measured by the tests). A process outside the sandbox that reads such a FIFO gets what the hook writes.
 - With `--allow-network`, there is no isolation. This is also the case on non-Linux systems and on other CPU types.
 - CPU, memory, and process count are not limited.
 - Without the sandbox (`--allow-network`), there is no pid namespace. hook-replay kills the hook's process group on a timeout and on SIGINT, SIGTERM, and SIGHUP, but a hook child that calls `setsid` leaves the group and survives.

@@ -289,6 +289,24 @@ test('default: a host FIFO in a sibling of the temp root cannot be written; --wr
   assert.equal(read(), 'pwned\n', 'control: --writable-fs reaches the FIFO');
 });
 
+// Documented residual (README "Residual risks", DESIGN §9): the kernel does not apply the read-only mount check to
+// a FIFO, so one outside /tmp, /dev and /run/user/<uid> stays writable from the default sandbox. Measured here for
+// $HOME and /var/tmp; if this test fails, the residual is gone and the docs must change with it.
+const varTmpOk = (() => { try { fs.accessSync('/var/tmp', fs.constants.W_OK); return true; } catch { return false; } })();
+for (const [where, base, why] of [['$HOME', os.homedir(), false], ['/var/tmp', '/var/tmp', !varTmpOk && '/var/tmp is not writable']]) {
+  test(`default (documented residual): a host FIFO under ${where} is writable from the sandbox`, { skip: skip || why }, async (t) => {
+    const d = fs.mkdtempSync(path.join(base, '.hook-replay-fifo-'));
+    const fifo = path.join(d, 'f.fifo');
+    assert.equal(spawnSync('mkfifo', [fifo]).status, 0);
+    const fd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+    t.after(() => { fs.closeSync(fd); fs.rmSync(d, { recursive: true, force: true }); });
+    const ro = await runOne({ hook: `echo residual > ${fifo}`, hookTimeout: '2' });
+    assert.equal(ro.isolation.readonly_fs, true);
+    const b = Buffer.alloc(64);
+    assert.equal(b.subarray(0, fs.readSync(fd, b)).toString(), 'residual\n');
+  });
+}
+
 test('default: a hook script stored under /tmp still runs (its path is bound read-only)', { skip }, async (t) => {
   const d = tmpDir(t);
   const script = path.join(d, 'hook.sh');
