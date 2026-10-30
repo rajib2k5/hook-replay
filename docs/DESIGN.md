@@ -368,8 +368,11 @@ past the timeout when `last_assistant_message` contains `FIXTURE_SLOW`).
 **Golden tests.** (a) Per fixture, a hand-written `expected.json` of `{key → outcome, mechanism}`, written from
 the hook's intent, not from our output; replay must equal it. (b) Pipeline fidelity: a test-only hook writes
 its stdin and `cat $transcript_path | sha256sum` to a file; payloads must equal hand-written expected payloads
-and the snapshot hash must equal the hash of the expected byte prefix. (c) Direct run: each fixture hook is
-spawned without hook-replay on the recorded payload; exit code and stdout must equal what the runner recorded.
+and the snapshot hash must equal the hash of the expected byte prefix. (c) Direct run, independent of replay:
+each fixture hook is spawned without hook-replay on the hand-written payload from (b) and a prefix the test cuts
+from the fixture bytes at the hand-specified line count; replay's recorded exit code, stdout and outcome must
+equal the direct run. A test-only hook that prints its canonical stdin and the prefix hash is run the same way,
+so (c) also fails when replay's payload or prefix is wrong (the example hooks do not read `cwd`).
 (d) Redaction: run the full CLI (table and `--json`) on the secrets fixture; none of the planted values, `alice`,
 or `/home/` may appear; with `--show-raw` they must (proves the test can fail). (e) Isolation: a hook that
 connects to a host Unix socket, to `127.0.0.1` and to a non-loopback host address fails under the wrapper with

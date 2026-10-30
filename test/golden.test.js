@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { replay } from '../src/replay.js';
 import { hookFromFlags } from '../src/hooks.js';
+import { classify } from '../src/classify.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -29,7 +30,6 @@ const runFixtureHook = (name, extra = {}) => replay({
 });
 
 // Source bytes [0, end) — what the snapshot handed to the hook must contain.
-const prefix = (relPath, end) => fs.readFileSync(path.join(projectsDir, relPath)).subarray(0, end);
 const prefixLines = (relPath, n) => {
   const buf = fs.readFileSync(path.join(projectsDir, relPath));
   let end = 0;
@@ -44,23 +44,45 @@ for (const name of Object.keys(HOOKS)) {
     const got = Object.fromEntries(results.map(r => [r.key, { outcome: r.verdict.outcome, mechanism: r.verdict.mechanism }]));
     assert.deepEqual(got, withoutComment(readJson(`${name}.json`)));
   });
+}
 
-  test(`(c) ${name}: running the hook directly on each recorded payload gives the same exit code and stdout`, async (t) => {
-    const { results } = await runFixtureHook(name);
-    const expected = withoutComment(readJson(`${name}.json`));
+// (c) Direct run, independent of replay: the stdin comes from the hand-written payloads.json and the
+// transcript_path from a prefix this test cuts from the fixture bytes at the hand-specified line count. The hook
+// is spawned without hook-replay; replay's recorded exit code, stdout and outcome must equal the direct run.
+// Each hook gets the entries its event and matcher select (by hand, below). echo-canonical prints the payload and
+// the prefix hash, so (c) also fails when replay hands a hook a different payload or prefix.
+const ECHO = `sh ${root}/test/hooks/echo-canonical.sh`;
+const DIRECT = {
+  'deny-rm': { hooks: [HOOKS['deny-rm']], applies: (p) => p.hook_event_name === 'PreToolUse' && p.tool_name === 'Bash' },
+  'post-generated': { hooks: [HOOKS['post-generated']], applies: (p) => p.hook_event_name === 'PostToolUse' && ['Edit', 'Write'].includes(p.tool_name) },
+  'stop-claims': { hooks: [HOOKS['stop-claims']], applies: (p) => p.hook_event_name === 'Stop' },
+  'echo-canonical': { hooks: ['PreToolUse', 'PostToolUse', 'Stop'].map(event => ({ hook: ECHO, event })), applies: () => true },
+};
+const ident = (p) => p.hook_event_name === 'Stop' ? `${p.session_id}|${p.last_assistant_message}` : `${p.hook_event_name}|${p.tool_use_id}`;
+
+for (const [name, { hooks: flags, applies }] of Object.entries(DIRECT)) {
+  test(`(c) ${name}: the hook run directly on the hand-written payload and prefix gives replay's exit code, stdout and outcome`, async (t) => {
+    const hooks = flags.map((f, i) => ({ ...hookFromFlags(f), id: `h${i + 1}` }));
+    const { results } = await replay({ projectsDir, hooks, allowNetwork: true, concurrency: 2, stderr: quiet });
     const d = tmpDir(t);
-    assert.ok(results.length > 0);
-    for (const [i, r] of results.entries()) {
-      const snap = path.join(d, `snap-${i}.jsonl`);
-      fs.writeFileSync(snap, prefix(r.file, r.snapshotEnd));
-      const { session_id, ...rest } = r.payload;
-      const input = JSON.stringify({ session_id, transcript_path: snap, ...rest });
-      const direct = spawnSync('sh', ['-c', HOOKS[name].hook], {
-        input, encoding: 'utf8', cwd: d, timeout: r.hook.timeoutS * 1000, killSignal: 'SIGKILL',
+    const entries = readJson('payloads.json').entries.filter(e => applies(e.payload));
+    assert.ok(entries.length > 0);
+    for (const [i, e] of entries.entries()) {
+      const hook = hooks.find(h => h.event === e.payload.hook_event_name);
+      const hits = results.filter(r => r.hookId === hook.id && ident(r.payload) === ident(e.payload));
+      assert.equal(hits.length, 1, ident(e.payload));
+      const r = hits[0];
+      const snap = path.join(d, `prefix-${i}.jsonl`);
+      fs.writeFileSync(snap, prefixLines(e.file, e.snapshotLines));
+      const { session_id, ...rest } = e.payload;
+      const direct = spawnSync('sh', ['-c', hook.command], {
+        input: JSON.stringify({ session_id, transcript_path: snap, ...rest }), encoding: 'utf8', cwd: d,
+        timeout: hook.timeoutS * 1000, killSignal: 'SIGKILL',
       });
-      assert.deepEqual({ exitCode: direct.status, signal: direct.signal, stdout: direct.stdout },
-        { exitCode: r.run.exitCode, signal: r.run.signal, stdout: r.run.stdout }, r.key);
-      assert.deepEqual({ outcome: r.verdict.outcome, mechanism: r.verdict.mechanism }, expected[r.key], r.key);
+      const directRun = { exitCode: direct.status, signal: direct.signal, stdout: direct.stdout, stderr: direct.stderr,
+        stdoutTruncated: false, timedOut: direct.error?.code === 'ETIMEDOUT', timeoutSource: 'hook', spawnError: null };
+      assert.deepEqual({ exitCode: r.run.exitCode, signal: r.run.signal, stdout: r.run.stdout, outcome: r.verdict.outcome },
+        { exitCode: direct.status, signal: direct.signal, stdout: direct.stdout, outcome: classify(directRun, hook).outcome }, ident(e.payload));
     }
   });
 }
