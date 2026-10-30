@@ -93,7 +93,7 @@ export function buildReport({ res, hooks, config, redact, samples = 5, now = new
   return {
     schema: SCHEMA, tool_version: version, generated_at: now, redacted,
     isolation: { network: res.isolation.network, readonly_fs: !!res.isolation.readonly_fs, probe: redact(res.isolation.probe ?? '') },
-    config: { ...config, project_dir: redact(config.project_dir) },
+    config: { ...config, project_dir: redact(config.project_dir), filters: redactDeep(config.filters ?? null, redact) },
     corpus: res.corpus,
     sandbox_overhead_ms: res.sandboxOverheadMs,
     warnings: [...warnings.map(w => redact(w)), ...FIDELITY_WARNINGS],

@@ -269,21 +269,40 @@ SIGHUP (hooks killed, temp files removed, no report).
 
 On by default; `--show-raw` disables it and prints a warning line. Applied in `report.js` when a sample or
 any string field is **stored** in the report model, so neither renderer can see raw text. Covers every string
-from a transcript or hook output, file paths, and the hook command. Order, each replaced by `[REDACTED:<kind>]`:
+from a transcript or hook output, file paths, the hook command, object keys inside `tool_input`, and the recorded
+filters. **Everything else printed** goes through the same redactor: the stderr banner (hook command), settings
+warnings (absolute paths), usage/load errors, the isolation error, `--dry-run` tool names (an MCP tool name can
+embed anything), and internal errors, which print a one-line redacted message (the stack only with
+`HOOK_REPLAY_DEBUG=1`, also redacted). Order, each replaced by `[REDACTED:<kind>]`:
 
 1. `-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----` → `private_key`
-2. `sk-ant-[A-Za-z0-9_-]{10,}`, `sk-(proj-)?[A-Za-z0-9_-]{20,}` → `api_key`
-3. `gh[pousr]_[A-Za-z0-9]{20,}`, `github_pat_[A-Za-z0-9_]{20,}` → `github_token`
+2. `sk-ant-[A-Za-z0-9_-]{10,}`, `sk-(proj-)?[A-Za-z0-9_-]{20,}`, Stripe `[sr]k_(live|test)_[A-Za-z0-9]{10,}` → `api_key`
+3. `gh[pousr]_[A-Za-z0-9]{20,}`, `github_pat_[A-Za-z0-9_]{20,}` → `github_token`; GitLab `glpat-[A-Za-z0-9_-]{20,}` →
+   `gitlab_token`; npm `npm_[A-Za-z0-9]{36}` → `npm_token`; Hugging Face `hf_[A-Za-z0-9]{30,}` → `hf_token` (these
+   prefixes may follow `_`, as inside a tool name, but not a letter or digit)
 4. `\b(AKIA|ASIA)[A-Z0-9]{16}\b` → `aws_key`; `xox[abprs]-[A-Za-z0-9-]{10,}` → `slack_token`;
    `AIza[0-9A-Za-z_-]{35}` → `google_key`
 5. `eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}` → `jwt`
 6. `(Authorization:\s*|Bearer\s+)\S+` → keep the prefix, `token`
-7. `/\b([A-Z0-9_]*(SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*)\s*[=:]\s*`
-   `("[^"]*"|'[^']*'|\S+)/gi` (one regex) → keep the name, `value`
+7. A name matching `[A-Z0-9_-]*(SECRET|TOKEN|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]KEY|PRIVATE[_-]KEY)[A-Z0-9_-]*`
+   (case-insensitive; so also `X-Api-Key`, `Api-Key`, `db_password`), then an optional closing quote (`"api_key":`,
+   or `\"secret\":` inside a JSON string), then `=` or `:`, then a value (`"..."`, `'...'`, `\"...\"` or `\S+`)
+   → keep the name, `value`.
+   7a. CLI flags with a space before the value: `--[x-]password|passwd|pass|token|secret|api-key|access-key|
+   private-key[-x] <value>` (the value may not start with `-`) → `value`. `--password=X` is rule 7.
+   7b. mysql/mariadb family only (`mysql`, `mysqldump`, `mariadb-dump`, ...): `-p` directly followed by ≥ 4
+   non-space characters later in the same command → `-p[REDACTED:value]`. Other commands' `-p` (often a port)
+   are left alone.
+   7c. Hex ≥ 32 characters only in key or header context: after a name containing `key|token|secret|auth|sig|
+   signature|session|cookie|credential|pass` and `=`/`:`, or after an `X-...:` header → `hex_secret`. A bare git
+   SHA survives.
 8. `([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@` → `$1[REDACTED:userinfo]@`
 9. `[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}` → `email`
-10. Home paths: literal `os.homedir()`, then `/home/[^/\s]+`, `/Users/[^/\s]+`, `[A-Z]:\\Users\\[^\\\s]+` → `~`
-11. Current username (≥ 3 chars, word-bounded, also inside encoded dir names like `-home-<user>-`) → `[user]`
+10. Home paths: literal `os.homedir()`, then `/home/[^/\s]+`, `/Users/[^/\s]+`, `[A-Z]:\\Users\\[^\\\s]+`, and
+    `/root` (not `/rootfs`) → `~`
+11. Current username (≥ 3 chars), case-insensitive. 6+ characters: anywhere, also inside identifiers
+    (`<user>_backup`, `<USER>_HOME`, `-home-<user>-`). 3–5 characters: only where no letter touches it (`emu_dir`
+    and `EMU2` are redacted, `lemur` is not). → `[user]`
 12. Tokens `[A-Za-z0-9+/=_-]{32,}` with Shannon entropy ≥ 4.5 bits/char → `high_entropy` (hex SHAs max 4.0)
 
 Human output then escapes C0/C1 control characters other than `\n`/`\t` as `\xNN` (transcripts can hold terminal

@@ -10,7 +10,7 @@ import { DEFAULT_MAX_LINE_BYTES } from './lines.js';
 import fs from 'node:fs';
 import { replay, IsolationError, DEFAULT_TIMEOUT_S } from './replay.js';
 import { buildReport, renderHuman, renderJson, OUTCOMES } from './report.js';
-import { makeRedactor } from './redact.js';
+import { makeRedactor, escapeControl } from './redact.js';
 
 export const VERSION = '0.1.0';
 
@@ -90,45 +90,61 @@ export function parseCli(argv) {
   return opts;
 }
 
-export async function main(argv, io = { stdout: process.stdout, stderr: process.stderr }) {
+// Everything this prints goes through the redactor (off only with --show-raw, and only once it is parsed).
+export async function main(argv, io = { stdout: process.stdout, stderr: process.stderr }, env = process.env) {
+  let red = makeRedactor();
+  try {
+    return await run(argv, io, (r) => { red = r; return r; });
+  } catch (e) {
+    const msg = e && e.message !== undefined ? e.message : String(e);
+    io.stderr.write(`hook-replay: internal error: ${red(msg)}\n`);
+    if (env.HOOK_REPLAY_DEBUG === '1' && e && e.stack) io.stderr.write(red(e.stack) + '\n');
+    return 1;
+  }
+}
+
+async function run(argv, io, setRedactor) {
+  let red = makeRedactor();
   let opts;
   try {
     opts = parseCli(argv);
   } catch (e) {
-    if (e instanceof UsageError) { io.stderr.write(`hook-replay: ${e.message}\n${USAGE}\n`); return 2; }
+    if (e instanceof UsageError) { io.stderr.write(red(`hook-replay: ${e.message}`) + `\n${USAGE}\n`); return 2; }
     throw e;
   }
   if (opts.help) { io.stdout.write(USAGE + '\n'); return 0; }
   if (opts.version) { io.stdout.write(VERSION + '\n'); return 0; }
-  for (const w of opts.loadWarnings) io.stderr.write(`hook-replay: warning: ${w}\n`);
+  red = setRedactor(makeRedactor({ enabled: !opts.showRaw }));
+  for (const w of opts.loadWarnings) io.stderr.write(`hook-replay: warning: ${red(w)}\n`);
   if (opts.dryRun) {
     const files = discover(opts.projectsDir).filter(f => keepFile(f, opts.filters));
     const s = await scan({ files, hooks: opts.hooks, filters: opts.filters, includeSubagents: opts.includeSubagents, maxLineBytes: opts.maxLineBytes, limit: opts.limit });
     io.stderr.write(`hook-replay ${VERSION}: dry run, nothing executed\n`);
-    const hooks = opts.hooks.map(h => ({ id: h.id, event: h.event, matcher: h.matcher ?? null, ...s.perHook[h.id] }));
+    const hooks = opts.hooks.map(h => ({ id: h.id, event: h.event, matcher: h.matcher === undefined ? null : red(h.matcher), ...s.perHook[h.id],
+      by_tool: Object.fromEntries(Object.entries(s.perHook[h.id].by_tool).map(([t, n]) => [red(t), n])) }));
     if (opts.json) io.stdout.write(JSON.stringify({ dry_run: true, corpus: s.corpus, hooks }, null, 2) + '\n');
     else {
       io.stdout.write(`files ${s.corpus.files}  lines ${s.corpus.lines}  sessions ${s.corpus.sessions}\n`);
       io.stdout.write('HOOK EVENT TOOL POINTS\n');
-      for (const h of hooks) for (const [tool, n] of Object.entries(h.by_tool)) io.stdout.write(`${h.id} ${h.event} ${tool} ${n}\n`);
+      for (const h of hooks) for (const [tool, n] of Object.entries(h.by_tool)) io.stdout.write(escapeControl(`${h.id} ${h.event} ${tool} ${n}`) + '\n');
     }
     return 0;
   }
   if (opts.showRaw) io.stderr.write('hook-replay: WARNING: --show-raw: redaction OFF, the report contains raw transcript text\n');
   let res;
   try {
-    res = await replay({ ...opts, stderr: io.stderr });
+    res = await replay({ ...opts, stderr: io.stderr, redact: red });
   } catch (e) {
-    if (e instanceof IsolationError) { io.stderr.write(`hook-replay: ${e.message}\n`); return 3; }
+    if (e instanceof IsolationError) { io.stderr.write(`hook-replay: ${red(e.message)}\n`); return 3; }
     throw e;
   }
   const warnings = [...opts.loadWarnings];
   if (opts.hooks.some(h => h.ifIgnored)) warnings.push('--ignore-if: hooks with an if field ran on every matcher hit, so their counts are an upper bound');
   if (opts.showRaw) warnings.push('redaction OFF (--show-raw): this report contains raw transcript text');
-  if (res.isolation.network === 'NOT ISOLATED') warnings.push('network NOT ISOLATED (--allow-network): hooks could reach the network');
+  if (res.isolation.network === 'NOT ISOLATED') warnings.push('NOT ISOLATED (--allow-network): hooks ran unwrapped and could reach the network, Unix sockets and other processes');
   const model = buildReport({
     res, hooks: opts.hooks, samples: opts.samples, warnings, version: VERSION, redacted: !opts.showRaw,
-    redact: makeRedactor({ enabled: !opts.showRaw }),
+    redact: red,
     config: { timeout_s: opts.timeoutS, concurrency: opts.concurrency, cwd_mode: opts.cwdMode, project_dir: opts.projectDir,
       filters: opts.filters.raw, sample: opts.filters.sample, limit: opts.limit },
   });

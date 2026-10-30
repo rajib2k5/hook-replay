@@ -54,3 +54,49 @@ test('rules apply in order: userinfo before email', () => {
 test('escapeControl escapes C0/C1 controls except newline and tab', () => {
   assert.equal(escapeControl('a\x1b[31mred\x07\tb\nc\x9b'), 'a\\x1b[31mred\\x07\tb\nc\\x9b');
 });
+
+// Review gaps (each value is fresh and fake, used nowhere else).
+const gaps = [
+  ['7 JSON-quoted api_key', '{"api_key": "qz7Vapikeyvalue41"}', '{"api_key": [REDACTED:value]}'],
+  ['7 JSON-quoted password and db_password', '{"password": "pw-JsonOnly-77", "db_password": "dbpw-JsonOnly-78"}',
+    '{"password": [REDACTED:value], "db_password": [REDACTED:value]}'],
+  ['7 escaped JSON inside a string', '{\\"secret\\": \\"esc-sekret-0091\\"}', '{\\"secret\\": [REDACTED:value]}'],
+  ['flag --password X', 'mytool --password hunter-flag-0042 --verbose', 'mytool --password [REDACTED:value] --verbose'],
+  ['flag --password=X', 'mytool --password=hunter-eq-0043 x', 'mytool --password=[REDACTED:value] x'],
+  ['flag --api-key X', 'cli --api-key apik-flag-0044', 'cli --api-key [REDACTED:value]'],
+  ['flag --token X', 'cli --token tok-flag-0045 run', 'cli --token [REDACTED:value] run'],
+  ['flag --secret X', "cli --secret 'sec flag 0046'", 'cli --secret [REDACTED:value]'],
+  ['mysql -pXXXX', 'mysql -u root -pMyPw0047 db', 'mysql -u root -p[REDACTED:value] db'],
+  ['mariadb-dump -pXXXX', 'mariadb-dump -pAnotherPw48 db', 'mariadb-dump -p[REDACTED:value] db'],
+  ['header X-Api-Key', 'curl -H "X-Api-Key: xak-header-0049"', 'curl -H "X-Api-Key: [REDACTED:value]'],
+  ['header Api-Key', 'Api-Key: ak-header-0050 rest', 'Api-Key: [REDACTED:value] rest'],
+  ['stripe sk_live', 'STRIPE sk_live_51FakeLiveKey0051abcdEF', 'STRIPE [REDACTED:api_key]'],
+  ['stripe sk_test', 'sk_test_51FakeTestKey0052abcdEF', '[REDACTED:api_key]'],
+  ['stripe rk_live', 'rk_live_51FakeRestricted0053ab', '[REDACTED:api_key]'],
+  ['gitlab glpat', 'token glpat-FakeGitlab0054abcdEFGH end', 'token [REDACTED:gitlab_token] end'],
+  ['npm token', 'npm_FakeNpmTokenValue0055abcdefghijklmno x', '[REDACTED:npm_token] x'],
+  ['hugging face', 'hf_FakeHuggingFaceToken0056abcdefgh', '[REDACTED:hf_token]'],
+  ['hex in key context', 'signing_key=0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c', 'signing_key=[REDACTED:hex_secret]'],
+  ['hex in header context', 'X-Hub-Signature: 9a8b7c6d5e4f30211203f4e5d6c7b8a99a8b7c6d', 'X-Hub-Signature: [REDACTED:hex_secret]'],
+  ['/root path', 'cat /root/.netrc and /root', 'cat ~/.netrc and ~'],
+];
+for (const [name, input, want] of gaps) test(`gap: ${name}`, () => assert.equal(R(input), want));
+
+test('a bare git SHA survives (hex is redacted only after a key or header name)', () => {
+  const sha = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+  assert.equal(R(`git checkout ${sha} && git show ${sha}`), `git checkout ${sha} && git show ${sha}`);
+});
+
+test('/rootfs and other words starting with root survive', () => {
+  assert.equal(R('ls /rootfs/x rootless'), 'ls /rootfs/x rootless');
+});
+
+test('username: case-insensitive and inside identifiers (fake user "quokka7")', () => {
+  const o = { username: 'quokka7', homedir: '/home/quokka7' };
+  assert.equal(R('quokka7_backup QUOKKA7_HOME Quokka7 xquokka7y', o), '[user]_backup [user]_HOME [user] x[user]y');
+});
+
+test('a short username (3-5 chars) is redacted only between non-letters', () => {
+  const o = { username: 'emu', homedir: '/home/emu' };
+  assert.equal(R('emu_dir EMU2 emus lemur', o), '[user]_dir [user]2 emus lemur');
+});

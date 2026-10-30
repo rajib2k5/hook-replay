@@ -9,6 +9,7 @@ import { Snapshot } from './snapshot.js';
 import { runHook, buildEnv, commandArgv, killRunning } from './runner.js';
 import { classify } from './classify.js';
 import { keepFile } from './filters.js';
+import { makeRedactor, escapeControl } from './redact.js';
 import { chooseIsolation, wrapperArgv, hookBinds, measureOverhead, IsolationError } from './sandbox.js';
 
 export { IsolationError };
@@ -39,7 +40,7 @@ export async function replay(opts) {
   const {
     projectsDir, hooks, filters = {}, includeSubagents = true, maxLineBytes, limit = 5000, homedir = os.homedir(),
     concurrency = 4, timeoutS = DEFAULT_TIMEOUT_S, cwdMode = 'temp', envNames = [], allowNetwork = false,
-    projectDir = process.cwd(), pluginRoot, env: envSource = process.env, stderr = process.stderr,
+    projectDir = process.cwd(), pluginRoot, env: envSource = process.env, stderr = process.stderr, redact = makeRedactor(),
     readonlyFs = false, bwrapBinary = 'bwrap',
   } = opts;
   const files = discover(projectsDir).filter(f => keepFile(f, filters) && (!filters.fileFilter || filters.fileFilter(f)));
@@ -74,7 +75,7 @@ export async function replay(opts) {
   }
   const total = Object.values(s.perHook).reduce((a, h) => a + h.points, 0);
   for (const h of hooks) {
-    stderr.write(`hook-replay: ${h.id} ${h.command}\n  ${s.perHook[h.id].points} points, isolation ${isolation.network}, cwd ${cwdMode}\n` +
+    stderr.write(`hook-replay: ${h.id} ${escapeControl(redact(h.args ? [h.command, ...h.args].join(' ') : h.command))}\n  ${s.perHook[h.id].points} points, isolation ${isolation.network}, cwd ${cwdMode}\n` +
       `  replay EXECUTES this hook ${s.perHook[h.id].points} times; a hook with side effects will perform them ${s.perHook[h.id].points} times\n`);
   }
 
