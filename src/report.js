@@ -13,8 +13,8 @@ const EXCERPT = 300;
 export const FIDELITY_WARNINGS = [
   'counterfactual history: the transcripts were recorded without this hook, so a replayed deny does not change later calls, and text the hook would have injected is absent',
   'transcript lag: the real hook may have seen less of the transcript than the snapshot holds',
-  'approximated: output schema, stop_hook_active, permission_mode, tool_response without toolUseResult; not reproduced: the if field, parallel hooks, the 8-continuation cap, self-signals under unshare; absent: prompt_id, effort, mcp_server, duration_ms, agent_type, scratchpad_dir',
-  'transcript_path is a snapshot (no files beside it); env allowlist, temp cwd and no network differ from a live session; stateful hooks see thousands of calls in minutes',
+  'approximated: output schema, stop_hook_active, permission_mode, tool_response without toolUseResult; not reproduced: the if field, parallel hooks, the 8-continuation cap; absent: prompt_id, effort, mcp_server, duration_ms, agent_type, scratchpad_dir',
+  'transcript_path is a snapshot (no files beside it); env allowlist, temp cwd and no sockets differ from a live session; stateful hooks see thousands of calls in minutes',
 ];
 
 const zero = () => Object.fromEntries(OUTCOMES.map(o => [o, 0]));

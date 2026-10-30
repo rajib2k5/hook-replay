@@ -113,22 +113,37 @@ All three are exported as env vars; in exec form (`args` set) they are also subs
 
 ## 5. Execution
 
-**Command.** Shell form: `sh -c <command>`. Exec form: `command` resolved on PATH, `args` as argv. Wrapped:
-- `unshare --user --net --pid --fork --kill-child --map-current-user -- <argv>` (preferred), else
-- `bwrap --dev-bind / / --unshare-net --unshare-pid --die-with-parent -- <argv>`; with `--readonly-fs`:
-  `bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --bind <tmp> <tmp> --unshare-net --unshare-pid
-  --die-with-parent -- <argv>` (requires bwrap; refuses otherwise).
+**Command.** Shell form: `sh -c <command>`. Exec form:
+`command` resolved on PATH, `args` as argv. Wrapped (bwrap only; `unshare` was rejected after review, see ADR-0001):
+- `bwrap --dev-bind / / --proc /proc --unshare-all --new-session --die-with-parent --seccomp 3 -- <argv>`;
+  with `--readonly-fs`: `bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp [--ro-bind <f> <f>]...
+  --bind <tmp> <tmp> --unshare-all --new-session --die-with-parent --seccomp 3 -- <argv>`, where each `<f>` is an
+  existing file under `/tmp` that the hook command names (so a hook script kept in `/tmp` still runs; files beside
+  it are not visible). `--readonly-fs` with `--allow-network` is refused.
+- `--unshare-all` gives new user, network, pid, ipc, uts and cgroup namespaces. `--new-session` stops a hook from
+  injecting input into the terminal. The bwrap binary is resolved on PATH once, at start.
+- **seccomp** (`src/seccomp.js`, classic BPF built in JS, no dependencies, handed to bwrap on a fresh pipe as fd 3
+  for every run, so the hook cannot rewrite it): `socket()` fails with `EACCES` for every address family, which
+  closes filesystem Unix sockets (docker, D-Bus / `systemd-run --user`, ibus, editor sockets) that a network
+  namespace leaves open. `socketpair()` stays allowed (it connects nothing; Node needs it for child stdio).
+  `io_uring_setup()` fails with `ENOSYS`, because `IORING_OP_SOCKET` makes a socket without `socket()`. The program
+  first checks `seccomp_data.arch`; a syscall from another ABI (32-bit compat) kills the process. Supported:
+  aarch64 (`AUDIT_ARCH_AARCH64` 0xC00000B7, socket 198, io_uring_setup 425) and x86_64 (`AUDIT_ARCH_X86_64`
+  0xC000003E, socket 41, io_uring_setup 425, and every x32 syscall, nr ≥ 0x40000000, fails with `EACCES`). Any
+  other architecture: no isolation (exit 3 unless `--allow-network`). The x86_64 program is tested only against
+  hand-derived bytes; it has not run on an x86_64 kernel.
 
-`--pid --fork --kill-child` extends the owner's command. Measured here: a hook's `setsid sleep &` survived SIGKILL
-of plain `unshare --user --net` and died with the pid namespace (same for bwrap `--unshare-pid`). Without it a hook that daemonises leaks a process per payload. Measured cost of the pid
-namespace: exit codes pass through (2 → 2, 7 → 7), but death by signal does not — bwrap reports `128+N`, and
-under unshare the hook is PID 1, so a signal it sends itself is ignored (exit 0). Rows 7/10 of §6 treat signal
-and other non-zero exits alike, so only the self-signal case changes an outcome; it is listed in §10.
+The pid namespace kills a daemonising hook with the sandbox. Measured here: `setsid sleep &` inside the hook
+died at timeout. Death by signal is reported as `128+N` (bwrap is PID 1 in the namespace, so a hook's own
+signals behave as normal); exit codes pass through.
 
-**Isolation probe** (once, at start): run `sh -c 'tail -n +3 /proc/net/dev'` under the chosen wrapper; it must
-succeed and list exactly `lo`. Try unshare, then bwrap. If neither passes: exit 3 with the reason, unless
-`--allow-network`, in which case run unwrapped and the report header and JSON say `network: "NOT ISOLATED"`.
-macOS v0.1 always needs `--allow-network` (`sandbox-exec` later). Wrapper overhead (20 runs of `true`, wrapped
+**Isolation probe** (once, at start; fails closed). Under the exact wrapper and filter: (1) connect to a Unix
+socket the probe listens on in its temp dir, (2) TCP connect to a listener the probe opens on `127.0.0.1` and on
+the first non-loopback host address (if any); every attempt must fail and no listener may see a connection;
+(3) the wrapper must exit 0 for `true` and for the probe client. Any other result (including a timeout or
+unparseable output) means not isolated: exit 3 with the reason. `--allow-network` skips the probe and runs every
+hook **unwrapped** (no namespaces, no seccomp); the banner, the report header and the JSON say
+`network: "NOT ISOLATED"`. Non-Linux always needs `--allow-network`. Wrapper overhead (20 runs of `true`, wrapped
 minus unwrapped) is reported as `sandbox_overhead_ms`.
 
 **Process.** stdin = `JSON.stringify(payload)` then close; EPIPE on stdin is ignored. cwd = `<tmp>/cwd`
@@ -139,7 +154,8 @@ as destructive-guard decide on `os.homedir()`. Stdout and stderr captured up to 
 `stdoutTruncated`). Latency = `process.hrtime` from spawn to `close`, wrapper included.
 
 **Timeout.** `min(hook.timeoutS, --timeout)`, `--timeout` default 10 s; `timeoutSource` = `hook` if `hook.timeoutS ≤
---timeout` else `replay_cap`. On expiry SIGKILL the wrapper (kills the namespace). After exit, wait ≤ 100 ms for
+--timeout` else `replay_cap`. Every hook runs in its own process group; on expiry SIGKILL the group (under bwrap
+this kills the namespace; unwrapped it kills children that did not leave the group, but not a `setsid` child). After exit, wait ≤ 100 ms for
 pipes to close, then destroy them.
 
 **Scheduling.** Points of one transcript run one at a time in emission order (§3), so one snapshot file per
@@ -236,7 +252,7 @@ h1   PreToolUse  Bash    2310      4   37    0    0     0     0       0   0     
 
 **`--json`** prints one object (or `--out <file>`, written 0600). Schema id `"hook-replay/report@1"`; adding
 fields keeps `@1`, removing or changing meaning bumps it. Top level: `schema, tool_version, generated_at,
-redacted, isolation{network:'unshare'|'bwrap'|'NOT ISOLATED', readonly_fs, probe}, config{timeout_s,
+redacted, isolation{network:'bwrap'|'NOT ISOLATED', readonly_fs, probe}, config{timeout_s,
 concurrency, cwd_mode, project_dir, filters, sample, limit}, corpus{files, lines, lines_malformed,
 lines_oversize, sessions, points_by_event}, sandbox_overhead_ms{p50,p95}, warnings[], hooks[{id, key, event,
 matcher, command, source, if_ignored, runs, truncated, counts{<outcome>:n}, by_tool{<tool>:counts},
@@ -273,9 +289,9 @@ escapes). Redaction is best-effort pattern matching, and the README says so.
 
 | Threat | Mitigation | Residual |
 |---|---|---|
-| Hook exfiltrates transcript data | net namespace, verified by probe | filesystem Unix sockets (e.g. a docker socket) still reachable; `SSH_AUTH_SOCK` is scrubbed |
-| Hook side effects × N (writes, deletes, logs) | banner, `--dry-run`, temp cwd, `CLAUDE_HOOK_REPLAY=1`, `--readonly-fs` | without `--readonly-fs` the hook can write anywhere the user can, N times. Same trust as enabling it, but N× the exposure |
-| Daemonising / fork-bomb hook | pid namespace killed on timeout | CPU/memory not limited in v0.1 |
+| Hook exfiltrates transcript data | bwrap namespaces + seccomp `socket()` → `EACCES` (no TCP/UDP, no filesystem or abstract Unix sockets, no io_uring), verified by a probe that tries to connect out; `SSH_AUTH_SOCK` is scrubbed | a hook can still write what it read into a file (see next row) for a later process to send; with `--allow-network` nothing is isolated; non-Linux and architectures other than aarch64/x86_64 have no isolation at all |
+| Hook side effects × N (writes, deletes, logs) | banner, `--dry-run`, temp cwd, `CLAUDE_HOOK_REPLAY=1`, `--readonly-fs` | without `--readonly-fs` the hook can write anywhere the user can, N times (including files such as `~/.bashrc` or `~/.config/systemd/user/` that something outside the sandbox runs later). Same trust as enabling it, but N× the exposure |
+| Daemonising / fork-bomb hook | pid namespace killed on timeout; process group killed unwrapped | CPU, memory and process count are not limited in v0.1; unwrapped (`--allow-network`) a `setsid` child survives |
 | Output bomb | 1 MiB caps | — |
 | Transcript text as terminal escapes | control-char escaping | — |
 | Secrets in report | §8 redaction, 0600 `--out` | pattern misses; raw prefixes sit in 0700 temp during the run and survive SIGKILL of hook-replay |
@@ -289,10 +305,10 @@ escapes). Redaction is best-effort pattern matching, and the README says so.
    sessions recorded without it, so the 39-false-warning class of bug is under-reported there.
 2. Transcript lag: the real hook may have seen less than the snapshot [docs: Common input fields].
 3. Approximated: output schema (§6), `stop_hook_active`, `permission_mode`, `tool_response` without
-   `toolUseResult`. Not reproduced: `if`, parallel hooks, the 8-continuation cap, self-signals under unshare.
+   `toolUseResult`. Not reproduced: `if`, parallel hooks, the 8-continuation cap.
    Absent: `prompt_id`, `effort`, `mcp_server`, `duration_ms`, `agent_type`, `scratchpad_dir`.
 4. `transcript_path` is a snapshot: hooks looking for files beside the transcript will not find them. Env
-   allowlist, temp cwd and no network differ from a live session (a network-needing hook shows as `error`).
+   allowlist, temp cwd and no sockets differ from a live session (a hook that needs the network or any socket shows as `error`).
    Stateful hooks see thousands of calls in minutes. Whether transcripts record expanded `file_path` is unknown.
 
 ## 11. Testing (test-first; `node --test`)
@@ -324,8 +340,10 @@ and the snapshot hash must equal the hash of the expected byte prefix. (c) Direc
 spawned without hook-replay on the recorded payload; exit code and stdout must equal what the runner recorded.
 (d) Redaction: run the full CLI (table and `--json`) on the secrets fixture; none of the planted values, `alice`,
 or `/home/` may appear; with `--show-raw` they must (proves the test can fail). (e) Isolation: a hook that
-connects to `127.0.0.1` on the host's listening test port fails under the wrapper (skipped, with a printed
-reason, where no wrapper exists). (f) Teardown: a hook that runs `setsid sleep 300 &` then hangs; after timeout
+connects to a host Unix socket, to `127.0.0.1` and to a non-loopback host address fails under the wrapper with
+`EACCES`, while the same command run directly connects; the probe rejects a wrapper that does not isolate or that
+exits non-zero; the seccomp bytes equal hand-derived programs for aarch64 and x86_64. These tests skip, with a
+printed reason, only when bwrap is not installed; with bwrap installed and isolation broken they fail. (f) Teardown: a hook that runs `setsid sleep 300 &` then hangs; after timeout
 no such process remains.
 
 **Mutation check** before calling a test done: swap rows 5 and 6, treat exit 1 + JSON as error, drop redaction
@@ -341,7 +359,8 @@ unsandboxed behind `--allow-network`; golden (a)–(c). (3) sandbox probe, wrapp
 ## 13. Cost and SLI
 
 Measured here (N=50, sequential, p50): `sh -c true` 1.1 ms, under unshare 1.7 ms, under bwrap 4.9 ms; `node -e 0`
-20.5 ms plain, 16.8 ms under unshare. A Node hook ≈ 20 ms/point → ≈ 200 points/s at concurrency 4 → 100k points
+20.5 ms plain, 16.8 ms under unshare. Re-measured after the switch to bwrap + seccomp (N=50, p50, aarch64):
+`sh -c true` 1.3 ms plain, 6.2 ms wrapped; `node -e 0` 20.2 ms plain, 27.0 ms wrapped. A Node hook ≈ 20 ms/point → ≈ 200 points/s at concurrency 4 → 100k points
 ≈ 9 min, plus one read and one temp copy of the corpus (≈ 2 GB each). Local point count not measured (private
 corpus; `--dry-run` gives it). SLI: share of runs whose outcome is caused by replay itself (`spawn`,
 `stdout_over_cap`, `replay_timeout`) ≈ 0; otherwise we are measuring the replay, not the hook.

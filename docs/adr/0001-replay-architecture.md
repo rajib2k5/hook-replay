@@ -1,4 +1,4 @@
-# ADR-0001: Replay hooks with our own subprocess runner over exact transcript prefixes, in a network namespace
+# ADR-0001: Replay hooks with our own subprocess runner over exact transcript prefixes, in a bwrap + seccomp sandbox
 
 Status: Proposed
 Date: 2026-10-29
@@ -29,15 +29,16 @@ often would it block, ask or warn, on what, and how slow is it? The forces:
   20.5 ms. Both wrappers are unprivileged and leave only `lo` in `/proc/net/dev`. Without a pid namespace, a
   hook's `setsid sleep &` survived SIGKILL of the wrapper; with one, it died.
 - **Owner's fixed choices.** Node ≥ 20, zero dependencies, `unshare` then `bwrap` for network isolation,
-  `sh -c` semantics, and analysis only.
+  `sh -c` semantics, and analysis only. (The isolation part was changed after review; see "Amendment" below.)
 
 ## Decision
 
 1. We will run each hook as **a separate subprocess per payload**, in the form Claude Code uses (shell form
    `sh -c`, or exec form when `args` is set). Each run gets stdin JSON, a scrubbed environment and a timeout,
-   and is wrapped in a user + network + pid namespace (`unshare`, else `bwrap`). One probe at startup checks
-   that the wrapper isolates the network. If no wrapper passes it, we refuse to run unless the user gives
-   `--allow-network`.
+   and is wrapped in bwrap with every namespace unshared, a new session, and a seccomp filter that makes
+   `socket()` fail (amended; see below). One probe at startup tries to connect out of the sandbox. If it
+   connects, or anything else surprises it, we refuse to run unless the user gives `--allow-network`, which runs
+   the hooks unwrapped and says `NOT ISOLATED`.
 2. We will **classify outcomes with our own pure function**, taken from the documented exit-code × stdout
    table and the per-event decision fields. Where the docs are silent (the exact output schema), we mark the
    rule as our approximation.
@@ -104,7 +105,7 @@ This cannot generalise across languages, and it says nothing about latency.
 **Positive.**
 - Any language and both command forms work, with the same exit-code and stdout contract Claude Code applies.
 - Latency includes process start, the number a user actually pays.
-- The network isolation is verified at startup, not assumed.
+- The isolation is verified at startup by trying to break it, not assumed.
 - A daemonising or hanging hook is fully torn down at timeout.
 - The output is deterministic for deterministic hooks: results are sorted by `(file, line, hook)`, whatever
   the concurrency.
@@ -113,9 +114,10 @@ This cannot generalise across languages, and it says nothing about latency.
 - We own a re-implementation of Claude Code's outcome rules. It can drift when Claude Code changes, and its
   output-schema check is our approximation. The golden fixtures catch our regressions, not upstream changes.
 - About 20 ms per payload for Node hooks. Within a transcript, runs are serialised by the snapshot design.
-- A pid namespace changes signal semantics. bwrap reports death by signal as `128+N`. Under unshare the hook is
-  PID 1, so a signal it sends to itself is ignored. Outcomes are unaffected, except for a hook that kills itself.
-- Linux only for an isolated run. macOS needs `--allow-network` in v0.1.
+- A pid namespace changes signal semantics: bwrap reports death by signal as `128+N`. Outcomes are unaffected.
+- Linux only for an isolated run, and only on aarch64 and x86_64 (the seccomp program is per architecture).
+  macOS needs `--allow-network` in v0.1.
+- A hook that legitimately needs any socket (network, D-Bus, a local daemon) shows as `error` under isolation.
 - Replay is counterfactual-blind. The history was produced without this hook, so a replayed deny cannot change
   later calls, and text the hook would have injected is absent.
 
@@ -123,7 +125,8 @@ This cannot generalise across languages, and it says nothing about latency.
 - Without `--readonly-fs`, a hook can write anywhere the user can, N times. We mitigate this with a banner,
   `--dry-run`, a temp cwd by default (this overrides the owner's "recorded cwd" default, which is still
   available as `--cwd recorded`) and `CLAUDE_HOOK_REPLAY=1`. We do not eliminate it.
-- Filesystem Unix sockets stay reachable inside the network namespace.
+- A hook can write what it reads into a file (without `--readonly-fs`, anywhere the user can) for a process
+  outside the sandbox to send later. CPU, memory and process count are not limited.
 - Raw transcript prefixes sit in a 0700 temp dir during the run, and survive if hook-replay is SIGKILLed.
 
 ## Revisit when
@@ -136,3 +139,33 @@ This cannot generalise across languages, and it says nothing about latency.
   the rules, and record the error in a new ADR).
 - A corpus reaches ≥ 10M payloads, or per-run spawn cost exceeds 50% of wall time (then consider an opt-in A).
 - macOS users are a meaningful share of issues (then add a `sandbox-exec` wrapper).
+
+## Amendment (after review, 2026-10-29): unshare rejected, bwrap + seccomp chosen
+
+**What was wrong.** The decision claimed that a user + network + pid namespace isolates the hook. It does not.
+A network namespace removes interfaces, not the filesystem. A review reproduced, under both
+`unshare --user --net --pid --fork --kill-child --map-current-user` and
+`bwrap --dev-bind / / --unshare-net --unshare-pid --die-with-parent`, a hook running
+`curl --unix-socket /var/run/docker.sock http://x/_ping` and getting `OK` (the docker API, which is root on the
+host). A second reviewer ran `systemd-run --user` over the session D-Bus socket from inside the hook: its curl to
+`example.com` returned 200, and started a process that outlived the run. Unix sockets are all over `$HOME` and
+`/tmp` on this machine (ibus, editor and toolkit sockets), so hiding directories would not have been enough. The
+old probe only checked that `/proc/net/dev` listed `lo`, which is true in both broken setups.
+
+**Decision.** bwrap only: `--unshare-all` (user, net, pid, ipc, uts, cgroup), `--new-session`, `--die-with-parent`,
+`--proc /proc`, and `--seccomp 3` with a classic-BPF program built in `src/seccomp.js` (pure JS, no dependency)
+that makes `socket()` fail with `EACCES` for every address family, `io_uring_setup()` fail with `ENOSYS`, and
+kills any syscall from another ABI. The program is passed on a fresh pipe for every run, so the hook cannot
+rewrite it. The probe now tests the property itself: from inside, connect to a Unix socket and to TCP listeners
+on `127.0.0.1` and on a host address that the probe opened, and require every attempt to fail and the wrapper to
+exit 0. `--allow-network` now means unwrapped.
+
+**Why unshare was rejected.** `unshare(1)` cannot install a seccomp filter, and without one a Unix socket is
+reachable whatever namespaces are unshared. Using it would need a second helper to apply the filter (a
+dependency, or native code), against the zero-dependency constraint. bwrap does both in one unprivileged binary.
+
+**Cost.** Measured here (N=50, p50, aarch64): `sh -c true` 1.3 ms plain, 6.2 ms wrapped; `node -e 0` 20.2 ms
+plain, 27.0 ms wrapped. Machines without bwrap now always need `--allow-network`.
+
+**Not verified.** The x86_64 program has been checked only against hand-derived bytes, not run on an x86_64
+kernel. macOS has no isolation.

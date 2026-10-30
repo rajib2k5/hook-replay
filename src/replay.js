@@ -9,7 +9,7 @@ import { Snapshot } from './snapshot.js';
 import { runHook, buildEnv, commandArgv } from './runner.js';
 import { classify } from './classify.js';
 import { keepFile } from './filters.js';
-import { chooseIsolation, wrapperArgv, measureOverhead, IsolationError } from './sandbox.js';
+import { chooseIsolation, wrapperArgv, hookBinds, measureOverhead, IsolationError } from './sandbox.js';
 
 export { IsolationError };
 
@@ -39,7 +39,7 @@ export async function replay(opts) {
     projectsDir, hooks, filters = {}, includeSubagents = true, maxLineBytes, limit = 5000, homedir = os.homedir(),
     concurrency = 4, timeoutS = DEFAULT_TIMEOUT_S, cwdMode = 'temp', envNames = [], allowNetwork = false,
     projectDir = process.cwd(), pluginRoot, env: envSource = process.env, stderr = process.stderr,
-    readonlyFs = false, wrappers = ['unshare', 'bwrap'],
+    readonlyFs = false, bwrapBinary = 'bwrap',
   } = opts;
   const files = discover(projectsDir).filter(f => keepFile(f, filters) && (!filters.fileFilter || filters.fileFilter(f)));
   const s = await scan({ files, hooks, filters, includeSubagents, maxLineBytes, homedir, limit });
@@ -48,7 +48,7 @@ export async function replay(opts) {
   let isolation;
   let sandboxOverheadMs;
   try {
-    isolation = await chooseIsolation({ allowNetwork, readonlyFs, tmp, candidates: wrappers });
+    isolation = await chooseIsolation({ allowNetwork, readonlyFs, tmp, binary: bwrapBinary });
     sandboxOverheadMs = await measureOverhead(isolation, { tmp });
   } catch (e) {
     cleanup();
@@ -86,9 +86,11 @@ export async function replay(opts) {
             if (cwdMode === 'recorded' && typeof p.payload.cwd === 'string') {
               try { if (fs.statSync(p.payload.cwd).isDirectory()) cwd = p.payload.cwd; } catch { /* keep temp cwd */ }
             }
-            const argv = wrapperArgv(isolation.wrapper, commandArgv(hook, env), { readonlyFs: isolation.readonly_fs, tmp });
+            const cmd = commandArgv(hook, env);
+            const argv = wrapperArgv(isolation.wrapper, cmd, { readonlyFs: isolation.readonly_fs, tmp, binary: isolation.binary,
+              binds: isolation.readonly_fs ? hookBinds(cmd) : [] });
             const run = await runHook({ argv, stdin, env, cwd, timeoutMs: t.seconds * 1000, timeoutSource: t.source,
-              killGroup: !isolation.wrapper });
+              killGroup: true, extraInput: isolation.filter ? [isolation.filter] : [] });
             snap.afterRun();
             const verdict = classify(run, hook);
             results.push({ key: p.key, file: p.file, lineNo: p.lineNo, event: p.event, hookId: id, hook, tool: toolOf(p),

@@ -26,8 +26,24 @@ export function buildEnv({ source = process.env, tmp, projectDir, pluginRoot, en
   return env;
 }
 
-// argv: full argv including any wrapper. Resolves to a RunResult; never rejects.
-export function runHook({ argv, stdin, env, cwd, timeoutMs, timeoutSource, killGroup = false }) {
+// Children still running, so a signal to hook-replay can kill them (and their process groups) before it exits.
+const live = new Set();
+
+const killChild = (child, group) => {
+  try {
+    if (group && child.pid) process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL');
+  } catch { try { child.kill('SIGKILL'); } catch { /* already gone */ } }
+};
+
+export function killRunning() {
+  for (const { child, group } of live) killChild(child, group);
+  return live.size;
+}
+
+// argv: full argv including any wrapper. extraInput: buffers written to fds 3, 4, ... of the child (the
+// seccomp program for bwrap), each on its own pipe so the hook can never rewrite them. Resolves to a
+// RunResult; never rejects.
+export function runHook({ argv, stdin, env, cwd, timeoutMs, timeoutSource, killGroup = true, extraInput = [] }) {
   return new Promise((resolve) => {
     const t0 = process.hrtime.bigint();
     const res = { exitCode: null, signal: null, stdout: '', stderr: '', stdoutTruncated: false, timedOut: false,
@@ -36,19 +52,22 @@ export function runHook({ argv, stdin, env, cwd, timeoutMs, timeoutSource, killG
     const len = { stdout: 0, stderr: 0 };
     let child;
     try {
-      child = spawn(argv[0], argv.slice(1), { env, cwd, stdio: ['pipe', 'pipe', 'pipe'], detached: killGroup });
+      child = spawn(argv[0], argv.slice(1), { env, cwd, stdio: ['pipe', 'pipe', 'pipe', ...extraInput.map(() => 'pipe')], detached: killGroup });
     } catch (e) {
       res.spawnError = String(e.code || e.message);
       res.latencyMs = Number(process.hrtime.bigint() - t0) / 1e6;
       resolve(res);
       return;
     }
+    const entry = { child, group: killGroup };
+    live.add(entry);
     let done = false;
     let timer = null;
     let grace = null;
     const finish = () => {
       if (done) return;
       done = true;
+      live.delete(entry);
       clearTimeout(timer);
       clearTimeout(grace);
       res.latencyMs = Number(process.hrtime.bigint() - t0) / 1e6;
@@ -56,11 +75,7 @@ export function runHook({ argv, stdin, env, cwd, timeoutMs, timeoutSource, killG
       res.stderr = Buffer.concat(out.stderr).toString('utf8');
       resolve(res);
     };
-    const kill = () => {
-      try {
-        if (killGroup && child.pid) process.kill(-child.pid, 'SIGKILL'); else child.kill('SIGKILL');
-      } catch { try { child.kill('SIGKILL'); } catch { /* already gone */ } }
-    };
+    const kill = () => killChild(child, killGroup);
     for (const name of ['stdout', 'stderr']) {
       child[name].on('data', (chunk) => {
         const room = OUTPUT_CAP - len[name];
@@ -83,6 +98,7 @@ export function runHook({ argv, stdin, env, cwd, timeoutMs, timeoutSource, killG
     });
     child.on('close', finish);
     timer = setTimeout(() => { res.timedOut = true; res.timeoutSource = timeoutSource; kill(); }, timeoutMs);
+    extraInput.forEach((buf, i) => { const p = child.stdio[3 + i]; p.on('error', () => {}); p.end(buf); });
     child.stdin.end(stdin);
   });
 }
