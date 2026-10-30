@@ -9,9 +9,21 @@ export class Snapshot {
     this.src = srcPath;
     this.dst = dstPath;
     this.srcFd = fs.openSync(srcPath, 'r');
-    this.fd = fs.openSync(dstPath, 'w', 0o600);
-    fs.fchmodSync(this.fd, 0o600);
+    this.#open();
     this.written = 0;
+    this.#mark();
+  }
+
+  // Our writes go through the fd, so the file can stay 0400: a hook that wants to change it must chmod first.
+  #open() {
+    this.fd = fs.openSync(this.dst, 'w', 0o600);
+    fs.fchmodSync(this.fd, 0o400);
+  }
+
+  // Identity of the bytes we wrote. ctime changes on every write, chmod or utimes and cannot be set back.
+  #mark() {
+    const st = fs.fstatSync(this.fd, { bigint: true });
+    this.seen = { ino: st.ino, size: st.size, ctime: st.ctimeNs };
   }
 
   #copy(from, to) {
@@ -29,16 +41,18 @@ export class Snapshot {
     if (end > this.written) this.#copy(this.written, end);
     else if (end < this.written) fs.ftruncateSync(this.fd, end);
     this.written = end;
+    this.#mark();
   }
 
-  // The hook may have changed the file; restore it if its size differs from what we wrote.
+  // The hook may have changed the file (any write, chmod, utimes, or a replacement): recreate it from source
+  // unless inode, size and ctime are exactly what we left.
   afterRun() {
-    let size = -1;
-    try { size = fs.statSync(this.dst).size; } catch { /* deleted by the hook */ }
-    if (size === this.written) return;
+    let st = null;
+    try { st = fs.statSync(this.dst, { bigint: true }); } catch { /* deleted by the hook */ }
+    if (st && st.ino === this.seen.ino && st.size === this.seen.size && st.ctimeNs === this.seen.ctime) return;
     try { fs.closeSync(this.fd); } catch { /* ignore */ }
     try { fs.rmSync(this.dst, { force: true }); } catch { /* ignore */ }
-    this.fd = fs.openSync(this.dst, 'w', 0o600);
+    this.#open();
     const end = this.written;
     this.written = 0;
     this.sync(end);

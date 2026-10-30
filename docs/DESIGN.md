@@ -172,11 +172,12 @@ transcript is enough. Up to `--concurrency` (default 4) transcripts run in paral
 each matching hook runs once per point, sequentially, in load order. Results are sorted by `(file, lineNo,
 hook id)` before reporting, so output is independent of concurrency; latency is not (use `--concurrency 1`).
 
-**Snapshot.** Per transcript, `<tmp>/t-<n>.jsonl` (0600) inside `mkdtemp(os.tmpdir()+'/hook-replay-')` (0700).
+**Snapshot.** Per transcript, `<tmp>/t-<n>.jsonl` (0400) inside `mkdtemp(os.tmpdir()+'/hook-replay-')` (0700).
 Before a point runs: if `snapshotEnd > written`, append source bytes `[written, snapshotEnd)` read from the
 source file (bytes, never re-serialised; oversize lines included); if `snapshotEnd < written` (a Pre point
-released late), `ftruncate` to `snapshotEnd`. After each run, if its size ≠ `snapshotEnd` (the hook changed it),
-recreate it from source. Kept as recorded, including earlier `stop_hook_summary` and hook
+released late), `ftruncate` to `snapshotEnd`. The snapshot is 0400 while hooks run (we write through our open fd). After each run, if its inode,
+size or ctime differ from what we left (any write, chmod, `utimes` or replacement by the hook; ctime cannot be set
+back, unlike mtime), recreate it from source. Kept as recorded, including earlier `stop_hook_summary` and hook
 attachment lines, because that is what a hook at that point could have seen; lines written after the point are
 not present. Delete each snapshot when its transcript finishes; remove `<tmp>` on exit. The signal handlers are
 installed as soon as `<tmp>` exists (before the probe, which already spawns sandboxes): on SIGINT, SIGTERM or
