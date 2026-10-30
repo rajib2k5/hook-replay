@@ -115,3 +115,19 @@ test('the filesystem is read-only by default; --writable-fs opts out with a warn
   assert.equal(JSON.parse(old.stdout).isolation.readonly_fs, true);
   assert.match(old.stderr, /--readonly-fs is deprecated/);
 });
+
+test('a relative hook script path that exists from the current directory is a usage error (hooks run in a temp dir)', (t) => {
+  for (const hook of ['node examples/hooks/deny-rm.js', 'sh ./examples/hooks/post-generated.sh', 'examples/hooks/post-generated.sh']) {
+    const r = cli(['--hook', hook, '--event', 'PreToolUse', '--dry-run']);
+    assert.equal(r.status, 2, hook);
+    assert.match(r.stderr, /is a relative path.*absolute path or \$CLAUDE_PROJECT_DIR\/examples\/hooks\//, hook);
+  }
+  const d = tmpDir(t);
+  const f = path.join(d, 'settings.json');
+  fs.writeFileSync(f, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'node', args: ['examples/hooks/deny-rm.js'] }] }] } }));
+  assert.equal(cli(['--settings', f, '--dry-run']).status, 2);
+  // Absolute, $CLAUDE_PROJECT_DIR and bare PATH names are fine; so is a relative name that does not exist here.
+  for (const hook of [`node ${root}/examples/hooks/deny-rm.js`, 'node $CLAUDE_PROJECT_DIR/examples/hooks/deny-rm.js', 'true', 'node no/such/file.js']) {
+    assert.equal(cli(['--hook', hook, '--event', 'PreToolUse', '--dry-run']).status, 0, hook);
+  }
+});

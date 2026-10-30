@@ -4,7 +4,7 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { discover } from './corpus.js';
 import { scan } from './scan.js';
-import { hookFromFlags, loadSettings, checkPluginRoot, UsageError } from './hooks.js';
+import { hookFromFlags, loadSettings, checkPluginRoot, checkRelativeScript, UsageError } from './hooks.js';
 import { parseFilters, keepFile } from './filters.js';
 import { DEFAULT_MAX_LINE_BYTES } from './lines.js';
 import fs from 'node:fs';
@@ -145,6 +145,7 @@ export function parseCli(argv) {
   } else {
     const h = hookFromFlags({ hook: v.hook, event: v.event, matcher: v.matcher, hookTimeout: v['hook-timeout'], onFailure: v['on-failure'] });
     checkPluginRoot(h, opts.pluginRoot);
+    checkRelativeScript(h);
     opts.hooks = [h];
   }
   return opts;

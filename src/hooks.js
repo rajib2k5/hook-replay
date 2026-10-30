@@ -1,6 +1,7 @@
 // HookSpec construction: from --hook flags (shell form) or from a settings.json / plugin hooks.json.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 import { validateMatcher } from './matcher.js';
 
 export const EVENTS = ['PreToolUse', 'PostToolUse', 'Stop'];
@@ -27,6 +28,28 @@ export function hookFromFlags({ hook, event, matcher, hookTimeout, onFailure }) 
 }
 
 export { hookKey };
+
+const INTERPRETERS = new Set(['node', 'nodejs', 'deno', 'bun', 'python', 'python3', 'sh', 'bash', 'zsh', 'dash', 'ruby', 'perl', 'php', 'tsx', 'ts-node']);
+
+// Hooks run in a temp cwd, so `node examples/hooks/x.js` would fail on every point (exit 1) if replay ran it. When
+// the script argument is a relative path that exists from hook-replay's own cwd, stop at load time instead (exit 2).
+// Resolving it for the user is not done: it would not be what the hook does where it is configured.
+export function checkRelativeScript(h, cwd = process.cwd()) {
+  const toks = (Array.isArray(h.args) ? [h.command, ...h.args] : h.command.trim().split(/\s+/)).map(t => t.replace(/^['"]|['"]$/g, ''));
+  const cands = [];
+  if (toks[0] && toks[0].includes('/')) cands.push(toks[0]);
+  if (toks[0] && INTERPRETERS.has(toks[0].split('/').pop())) { const arg = toks.slice(1).find(t => !t.startsWith('-')); if (arg) cands.push(arg); }
+  for (const c of cands) {
+    if (path.isAbsolute(c) || c.startsWith('$') || c.startsWith('~')) continue;
+    let isFile = false;
+    try { isFile = fs.statSync(path.resolve(cwd, c)).isFile(); } catch { /* not here */ }
+    if (isFile) {
+      const rel = c.replace(/^\.\//, '');
+      throw new UsageError(`hook ${h.id} (${h.source}): script ${c} is a relative path, and replay runs hooks in a temp directory; ` +
+        `use an absolute path or $CLAUDE_PROJECT_DIR/${rel}`);
+    }
+  }
+}
 
 const PLUGIN_ROOT_RE = /\$\{?CLAUDE_PLUGIN_ROOT\b/;
 
@@ -74,6 +97,7 @@ export function loadSettings(file, { ignoreIf = false, pluginRoot } = {}) {
         if (!args && x.shell === 'bash') h.shell = 'bash';
         h.key = hookKey(h);
         checkPluginRoot(h, pluginRoot);
+        checkRelativeScript(h);
         hooks.push(h);
       });
     });
