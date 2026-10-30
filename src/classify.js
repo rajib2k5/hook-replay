@@ -49,12 +49,11 @@ const verdict = (outcome, mechanism, reason = null, annotations) => {
   return v;
 };
 
+// With exit 2 the reason is stderr, unless the JSON itself makes a blocking decision [docs: Exit code 2].
 const blockingReason = (o, event) => {
   const h = isObj(o.hookSpecificOutput) ? o.hookSpecificOutput : {};
-  if (event === 'PreToolUse' && nonEmpty(h.permissionDecisionReason)) return h.permissionDecisionReason;
-  if (nonEmpty(o.reason)) return o.reason;
-  if (nonEmpty(o.stopReason)) return o.stopReason;
-  return null;
+  if (event === 'PreToolUse' && h.permissionDecision !== undefined) return h.permissionDecision === 'deny' && nonEmpty(h.permissionDecisionReason) ? h.permissionDecisionReason : null;
+  return o.decision === 'block' && nonEmpty(o.reason) ? o.reason : null;
 };
 
 export function fields(o, event) {
@@ -71,7 +70,8 @@ export function fields(o, event) {
       decided = verdict(outcome, mech, reason);
     }
   } else if (event === 'PostToolUse') {
-    if (o.decision === 'block') return verdict('block', 'decision_block', o.reason ?? null);
+    // The tool already ran: a PostToolUse block is feedback to Claude, named so the report can say so.
+    if (o.decision === 'block') return verdict('block', 'decision_block_feedback', o.reason ?? null);
   } else if (event === 'Stop') {
     if (o.decision === 'block') return verdict('block', 'decision_block', o.reason ?? null);
     if (nonEmpty(h.additionalContext)) return verdict('block', 'additional_context', h.additionalContext);
@@ -83,6 +83,7 @@ export function fields(o, event) {
   if (event !== 'Stop' && nonEmpty(h.additionalContext)) return verdict('warn', 'additional_context', h.additionalContext);
   if (nonEmpty(o.systemMessage)) return verdict('warn', 'system_message', o.systemMessage);
   if (event === 'PostToolUse' && 'updatedToolOutput' in h) return verdict('warn', 'updated_tool_output');
+  if (event === 'PostToolUse' && 'updatedMCPToolOutput' in h) return verdict('warn', 'updated_mcp_tool_output');
   if (event === 'PreToolUse' && 'updatedInput' in h) return verdict('warn', 'updated_input');
   return verdict('pass', 'json_no_decision');
 }
@@ -99,7 +100,7 @@ export function classify(run, { event, onFailure = 'continue' }) {
   if (code === 2) {
     if (event === 'Stop' && (run.stdout || '') === '' && /No such file or directory/.test(run.stderr || '')) return verdict('error', 'exit2_missing_file', stderr);
     if (p.kind === 'JSON' && p.o.continue === false) return verdict('stop', 'continue_false', p.o.stopReason ?? stderr);
-    return verdict('block', 'exit2', (p.kind === 'JSON' && blockingReason(p.o, event)) || stderr);
+    return verdict('block', event === 'PostToolUse' ? 'exit2_feedback' : 'exit2', (p.kind === 'JSON' && blockingReason(p.o, event)) || stderr);
   }
   if (p.kind === 'JSON') {
     const v = fields(p.o, event);

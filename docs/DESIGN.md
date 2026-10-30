@@ -216,7 +216,7 @@ the wrong type/value fails; unknown fields are ignored.
 | 3 | `spawnError` | `error` · `spawn` → `fail()` |
 | 4 | exit 2, Stop, stdout empty, stderr matches `/No such file or directory/` | `error` · `exit2_missing_file` [docs: Exit code output] |
 | 5 | exit 2, and `JSON(o)` with `o.continue===false` | `stop` · `continue_false` |
-| 6 | exit 2 | `block` · `exit2`; reason = JSON blocking reason if any, else stderr |
+| 6 | exit 2 | `block` · `exit2` (PostToolUse: `exit2_feedback`); reason = stderr, unless the JSON itself makes a blocking decision (Pre `permissionDecision:'deny'` or `decision:'block'`; Post/Stop `decision:'block'`), then its reason [docs: Exit code 2] |
 | 7 | exit 0 or other, `JSON(o)` | `fields(o)`; for exit ∉ {0,2} with `onFailure=block`: `fail()` [docs: Block the action when a hook fails] |
 | 8 | exit 0, `PLAIN` | `pass` |
 | 9 | exit 0, `INVALID(r)` | `error` · `invalid_json:r` → `fail()` |
@@ -229,12 +229,14 @@ the wrong type/value fails; unknown fields are ignored.
 2. **PreToolUse**: `d = hookSpecificOutput.permissionDecision ?? {approve:'allow', block:'deny'}[o.decision]`
    (hookSpecificOutput wins if both). `deny`→`block`, `defer`→`defer`, `ask`→`ask`, `allow`→`allow`.
    Mechanism `permission_decision` or `deprecated_decision`.
-3. **PostToolUse**: `o.decision==='block'` → `block` (feedback to Claude; the tool already ran).
+3. **PostToolUse**: `o.decision==='block'` → `block` · `decision_block_feedback`. The tool already ran, so this block
+   (and exit 2's `exit2_feedback`) is feedback to Claude; each such sample carries `effect: "feedback to Claude; the
+   tool already ran"` and the README explains it.
 4. **Stop**: `o.decision==='block'` → `block`; non-empty `hookSpecificOutput.additionalContext` → `block` ·
    `additional_context` — on Stop it **continues the conversation** [docs: Stop decision control], so it is not a
    warning.
 5. Otherwise, non-empty `additionalContext` (Pre/Post) or `systemMessage` (any event), or Post
-   `updatedToolOutput`, or Pre `updatedInput` → `warn` with that mechanism. A PreToolUse `allow`/`pass` that also
+   `updatedToolOutput` / `updatedMCPToolOutput`, or Pre `updatedInput` → `warn` with that mechanism. A PreToolUse `allow`/`pass` that also
    carries `additionalContext` stays `allow`/`pass` with `annotations:['additional_context']`.
 6. Else `pass`.
 

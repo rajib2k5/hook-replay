@@ -108,7 +108,7 @@ test('fields: deprecated decision approve/block, and hookSpecificOutput wins whe
 });
 
 test('fields: PostToolUse decision block is block; Stop decision block and Stop additionalContext are block', () => {
-  assert.deepEqual(c({ stdout: J({ decision: 'block', reason: 'r' }) }, 'PostToolUse'), ['block', 'decision_block']);
+  assert.deepEqual(c({ stdout: J({ decision: 'block', reason: 'r' }) }, 'PostToolUse'), ['block', 'decision_block_feedback']);
   assert.deepEqual(c({ stdout: J({ decision: 'block', reason: 'r' }) }, 'Stop'), ['block', 'decision_block']);
   assert.deepEqual(c({ stdout: J({ hookSpecificOutput: { hookEventName: 'Stop', additionalContext: 'run the tests' } }) }, 'Stop'), ['block', 'additional_context']);
 });
@@ -147,4 +147,26 @@ test('a reason is reported for flagged outcomes', () => {
   assert.equal(v.reason, 'force push');
   const w = classify(run({ stdout: J({ hookSpecificOutput: { hookEventName: 'Stop', additionalContext: 'show evidence' } }) }), { event: 'Stop', onFailure: 'continue' });
   assert.equal(w.reason, 'show evidence');
+});
+
+// Review: exit 2's reason is stderr unless the JSON itself makes a blocking decision [docs: Exit code 2].
+test('row 6: exit 2 with a non-blocking JSON reason (allow, ask, or no decision) reports stderr', () => {
+  const r = (stdout, event = 'PreToolUse') => classify(run({ exitCode: 2, stdout, stderr: 'stderr is the reason\n' }), { event, onFailure: 'continue' }).reason;
+  assert.equal(r(pre({ permissionDecision: 'allow', permissionDecisionReason: 'json allow reason' })), 'stderr is the reason');
+  assert.equal(r(pre({ permissionDecision: 'ask', permissionDecisionReason: 'json ask reason' })), 'stderr is the reason');
+  assert.equal(r(J({ reason: 'json reason, no decision' }), 'PostToolUse'), 'stderr is the reason');
+  assert.equal(r(J({ stopReason: 'json stopReason, continue not false' })), 'stderr is the reason');
+  assert.equal(r(J({ decision: 'block', reason: 'json post block reason' }), 'PostToolUse'), 'json post block reason');
+  assert.equal(r(J({ decision: 'block', reason: 'json deprecated block' })), 'json deprecated block');
+});
+
+test('PostToolUse: exit 2 and decision block are block with a feedback mechanism (the tool already ran)', () => {
+  assert.deepEqual(c({ exitCode: 2, stderr: 'no' }, 'PostToolUse'), ['block', 'exit2_feedback']);
+  assert.deepEqual(c({ stdout: J({ decision: 'block', reason: 'r' }) }, 'PostToolUse'), ['block', 'decision_block_feedback']);
+  assert.deepEqual(c({ exitCode: 2, stderr: 'no' }, 'PreToolUse'), ['block', 'exit2']);
+});
+
+test('PostToolUse updatedMCPToolOutput is warn', () => {
+  assert.deepEqual(c({ stdout: J({ hookSpecificOutput: { hookEventName: 'PostToolUse', updatedMCPToolOutput: { content: [] } } }) }, 'PostToolUse'),
+    ['warn', 'updated_mcp_tool_output']);
 });

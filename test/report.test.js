@@ -81,3 +81,11 @@ test('human output has the table row and escapes control characters from transcr
   assert.ok(!out.includes('\x1b'));
   assert.match(out, /\\x1b\[31mred/);
 });
+
+test('a PostToolUse block (exit2_feedback / decision_block_feedback) says it is feedback; a PreToolUse block does not', () => {
+  const m = build([mk(1, 'block', { mech: 'exit2_feedback' }), mk(2, 'block', { mech: 'decision_block_feedback' }), mk(3, 'block', { mech: 'exit2' })], { samples: 5 });
+  const effects = Object.fromEntries(m.hooks[0].samples.map(s => [s.mechanism, s.effect ?? null]));
+  assert.deepEqual(effects, { exit2_feedback: 'feedback to Claude; the tool already ran',
+    decision_block_feedback: 'feedback to Claude; the tool already ran', exit2: null });
+  assert.equal(renderHuman(m).split('\n').filter(l => l.trim() === 'effect: feedback to Claude; the tool already ran').length, 2);
+});

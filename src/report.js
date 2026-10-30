@@ -36,6 +36,8 @@ function redactDeep(v, redact) {
   if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [redact(k), redactDeep(x, redact)]));
   return v;
 }
+// Mechanisms whose `block` cannot stop anything: the tool already ran (DESIGN.md §6).
+const EFFECT = { exit2_feedback: 'feedback to Claude; the tool already ran', decision_block_feedback: 'feedback to Claude; the tool already ran' };
 const cut = (s) => s === null || s === undefined ? null : String(s).slice(0, EXCERPT);
 
 function sample(r, hook, redact) {
@@ -46,6 +48,7 @@ function sample(r, hook, redact) {
     session: redact(r.sessionId), file: redact(r.file), line: r.lineNo, timestamp: r.timestamp,
     tool: redact(r.tool),
   };
+  if (EFFECT[r.verdict.mechanism]) s.effect = EFFECT[r.verdict.mechanism];
   const excerpt = typeof input === 'string' ? redact(input) : JSON.stringify(redactDeep(input ?? null, redact));
   s[r.event === 'Stop' ? 'last_assistant_message' : 'tool_input'] = cut(excerpt);
   s.reason = cut(redact(r.verdict.reason ?? (r.run.stderr || null)));
@@ -135,6 +138,7 @@ export function renderHuman(m) {
       const input = s.tool_input ?? s.last_assistant_message;
       if (input) out.push(`      input:  ${input}`);
       if (s.reason) out.push(`      reason: ${s.reason}`);
+      if (s.effect) out.push(`      effect: ${s.effect}`);
       if (s.fidelity.length) out.push(`      fidelity: ${s.fidelity.join(', ')}`);
       out.push(`      real session: ${s.real_signal_note}`);
     }
