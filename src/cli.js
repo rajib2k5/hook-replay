@@ -6,6 +6,10 @@ import { discover } from './corpus.js';
 import { scan } from './scan.js';
 import { hookFromFlags, UsageError } from './hooks.js';
 import { DEFAULT_MAX_LINE_BYTES } from './lines.js';
+import fs from 'node:fs';
+import { replay, IsolationError, DEFAULT_TIMEOUT_S } from './replay.js';
+import { buildReport, renderHuman, renderJson } from './report.js';
+import { makeRedactor } from './redact.js';
 
 export const VERSION = '0.1.0';
 
@@ -52,7 +56,19 @@ export function parseCli(argv) {
     includeSubagents: !v['no-subagents'],
     maxLineBytes: posInt(v['max-line-bytes'], '--max-line-bytes', DEFAULT_MAX_LINE_BYTES),
     limit: posInt(v.limit, '--limit', 5000),
+    samples: v.samples === undefined ? 5 : Number(v.samples),
+    concurrency: posInt(v.concurrency, '--concurrency', 4),
+    timeoutS: v.timeout === undefined ? DEFAULT_TIMEOUT_S : Number(v.timeout),
+    cwdMode: v.cwd ?? 'temp',
+    envNames: v.env ?? [],
+    allowNetwork: !!v['allow-network'], readonlyFs: !!v['readonly-fs'],
+    projectDir: path.resolve(v['project-dir'] ?? process.cwd()),
+    pluginRoot: v['plugin-root'] === undefined ? undefined : path.resolve(v['plugin-root']),
+    showRaw: !!v['show-raw'],
   };
+  if (!Number.isInteger(opts.samples) || opts.samples < 0) throw new UsageError('--samples must be a non-negative integer');
+  if (!(opts.timeoutS > 0)) throw new UsageError('--timeout must be a positive number of seconds');
+  if (!['temp', 'recorded'].includes(opts.cwdMode)) throw new UsageError('--cwd must be temp or recorded');
   opts.hooks = [hookFromFlags({ hook: v.hook, event: v.event, matcher: v.matcher, hookTimeout: v['hook-timeout'], onFailure: v['on-failure'] })];
   return opts;
 }
@@ -80,6 +96,28 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
     }
     return 0;
   }
-  io.stderr.write('hook-replay: only --dry-run is implemented\n');
-  return 1;
+  if (opts.showRaw) io.stderr.write('hook-replay: WARNING: --show-raw: redaction OFF, the report contains raw transcript text\n');
+  let res;
+  try {
+    res = await replay({ ...opts, stderr: io.stderr });
+  } catch (e) {
+    if (e instanceof IsolationError) { io.stderr.write(`hook-replay: ${e.message}\n`); return 3; }
+    throw e;
+  }
+  const warnings = [];
+  if (opts.showRaw) warnings.push('redaction OFF (--show-raw): this report contains raw transcript text');
+  if (res.isolation.network === 'NOT ISOLATED') warnings.push('network NOT ISOLATED (--allow-network): hooks could reach the network');
+  const model = buildReport({
+    res, hooks: opts.hooks, samples: opts.samples, warnings, version: VERSION, redacted: !opts.showRaw,
+    redact: makeRedactor({ enabled: !opts.showRaw }),
+    config: { timeout_s: opts.timeoutS, concurrency: opts.concurrency, cwd_mode: opts.cwdMode, project_dir: opts.projectDir,
+      filters: {}, sample: null, limit: opts.limit },
+  });
+  const text = opts.json || opts.out ? renderJson(model) : renderHuman(model);
+  if (opts.out) {
+    fs.writeFileSync(opts.out, text, { mode: 0o600 });
+    fs.chmodSync(opts.out, 0o600);
+    if (!opts.json) io.stdout.write(renderHuman(model));
+  } else io.stdout.write(text);
+  return 0;
 }
