@@ -1,5 +1,6 @@
 // Pre-pass over the corpus: reconstruct every point, apply filters and matchers, and select which
 // (point, hook) pairs run, honouring --limit in deterministic order. Holds only keys, not payloads.
+import fs from 'node:fs';
 import os from 'node:os';
 import { readLines } from './lines.js';
 import { Reconstructor, emptyStats } from './reconstruct.js';
@@ -24,7 +25,10 @@ export async function scan({ files, hooks, filters = {}, includeSubagents = true
   const sessions = new Set();
   const selected = new Map(); // relPath -> Map(pointKey -> [hookId])
   const perHook = Object.fromEntries(hooks.map(h => [h.id, { points: 0, by_tool: {}, truncated: false }]));
+  let unreadable = 0;
   for (const file of files) {
+    // A file we cannot open is counted and skipped; nothing of it is selected, so the run never opens it.
+    try { fs.closeSync(fs.openSync(file.path, 'r')); } catch { unreadable++; continue; }
     if (!file.subagent) sessions.add(file.sessionUuid);
     const sel = new Map();
     for await (const p of filePoints(file, { includeSubagents, maxLineBytes, homedir }, stats)) {
@@ -43,7 +47,7 @@ export async function scan({ files, hooks, filters = {}, includeSubagents = true
     if (sel.size) selected.set(file.relPath, sel);
   }
   const corpus = {
-    files: files.length, lines: stats.lines, lines_malformed: stats.lines_malformed, lines_oversize: stats.lines_oversize,
+    files: files.length, files_unreadable: unreadable, lines: stats.lines, lines_malformed: stats.lines_malformed, lines_oversize: stats.lines_oversize,
     sessions: sessions.size, points_by_event: stats.points_by_event,
   };
   return { corpus, stats, selected, perHook };

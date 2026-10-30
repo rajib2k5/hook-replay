@@ -141,6 +141,7 @@ async function run(argv, io, setRedactor) {
   const warnings = [...opts.loadWarnings];
   if (opts.hooks.some(h => h.ifIgnored)) warnings.push('--ignore-if: hooks with an if field ran on every matcher hit, so their counts are an upper bound');
   if (opts.showRaw) warnings.push('redaction OFF (--show-raw): this report contains raw transcript text');
+  if (res.corpus.files_unreadable) warnings.push(`${res.corpus.files_unreadable} transcript file(s) could not be read and were skipped`);
   if (res.isolation.network === 'NOT ISOLATED') warnings.push('NOT ISOLATED (--allow-network): hooks ran unwrapped and could reach the network, Unix sockets and other processes');
   const model = buildReport({
     res, hooks: opts.hooks, samples: opts.samples, warnings, version: VERSION, redacted: !opts.showRaw,

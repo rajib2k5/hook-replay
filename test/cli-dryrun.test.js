@@ -15,7 +15,7 @@ test('dry run --json reports corpus counts and per-tool point counts, and runs n
   assert.equal(r.status, 0, r.stderr);
   const out = JSON.parse(r.stdout);
   assert.deepEqual(out.corpus, {
-    files: 6, lines: 86, lines_malformed: 3, lines_oversize: 0, sessions: 5,
+    files: 6, files_unreadable: 0, lines: 86, lines_malformed: 3, lines_oversize: 0, sessions: 5,
     points_by_event: { PreToolUse: 27, PostToolUse: 25, Stop: 7 },
   });
   assert.equal(out.hooks.length, 1);

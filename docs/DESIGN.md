@@ -45,6 +45,8 @@ type Verdict = { outcome: Outcome; mechanism: string; reason: string|null };
 
 **Discovery.** Walk `--projects-dir` (default `~/.claude/projects`) for `*.jsonl`, no symlinks, sorted bytewise.
 Main = `<proj>/<uuid>.jsonl`; subagent = under `<proj>/<uuid>/subagents/**`. Size at open is EOF (live files grow).
+A file that cannot be opened is counted as `corpus.files_unreadable`, named in a report warning by count only, and
+skipped; the run goes on.
 
 **Lines.** `lines.js` splits a byte stream on `\n` (not `readline`), yielding `{offset, length, lineNo, bytes}`.
 Over `--max-line-bytes` (default 16 MiB): `bytes: null`, counted `lines_oversize`, still in the byte prefix. A last
