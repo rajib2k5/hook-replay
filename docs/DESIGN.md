@@ -347,3 +347,19 @@ corpus; `--dry-run` gives it). SLI: share of runs whose outcome is caused by rep
 `stdout_over_cap`, `replay_timeout`) ≈ 0; otherwise we are measuring the replay, not the hook.
 **Unverified (needs a real Claude Code or a person):** §6 agreeing with Claude Code on the fixture hooks; macOS;
 whether `max_tokens` turn ends fire Stop (v0.1: no).
+
+## Deviations (v0.1 implementation)
+
+Smallest fixes where the text above was self-contradictory or did not work as written.
+
+1. **§8 rule 6.** `(Authorization:\s*|Bearer\s+)\S+` leaves the token of `Authorization: Bearer <token>` unredacted:
+   the first alternative consumes `Bearer` as the value, and the global match resumes after it. The rule is
+   `(Authorization:\s*(?:Bearer\s+)?|Bearer\s+)\S+`. The secrets fixture plants exactly this header.
+2. **§6 `fields` step 5.** "A PreToolUse `allow`/`pass` that also carries `additionalContext` stays `allow`/`pass`"
+   contradicts the sentence before it (no decision + `additionalContext` → `warn`). Implemented: an explicit `allow`
+   keeps `allow` with `annotations:['additional_context']`; no decision + `additionalContext` is `warn`.
+3. **§7 samples for Stop.** Stop points have no `tool_input`; their sample carries a `last_assistant_message`
+   excerpt in its place.
+4. **§3 / §5 reading.** The banner must state N before anything runs and `--limit` needs a deterministic global
+   order, so the corpus is reconstructed twice: a scan that keeps only point keys, then the run. `--sample` still
+   needs no extra pass of its own.
