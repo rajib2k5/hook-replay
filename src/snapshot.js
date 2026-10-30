@@ -17,10 +17,12 @@ export class SnapDirError extends Error {}
 // the dir) and put a link at the old path made the next create land in the link's target (round-5 review, ren.sh,
 // snapln.sh). So every entry is created, checked and removed through /proc/self/fd/<fd>/<name>, which names this
 // dir wherever it now is, and before each create the path must still name it (same dev and ino), or SnapDirError.
-// Without /proc (not Linux, --allow-network only) the path is used, after the same check.
+// Without /proc (not Linux, --allow-network only) the path is used, after the same check. `what` names the dir in
+// that error.
 export class SnapDir {
-  constructor(dir) {
+  constructor(dir, what = 'snapshot directory') {
     this.path = dir;
+    this.what = what;
     this.fd = fs.openSync(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
     const st = fs.fstatSync(this.fd, { bigint: true });
     this.id = { dev: st.dev, ino: st.ino };
@@ -33,7 +35,7 @@ export class SnapDir {
     let st = null;
     try { st = fs.lstatSync(this.path, { bigint: true }); } catch { /* gone */ }
     if (!st || !st.isDirectory() || st.dev !== this.id.dev || st.ino !== this.id.ino) {
-      throw new SnapDirError(`${this.path} is no longer the snapshot directory hook-replay created (a hook renamed or replaced it or a parent); stopped rather than create a snapshot elsewhere`);
+      throw new SnapDirError(`${this.path} is no longer the ${this.what} hook-replay created (a hook renamed or replaced it or a parent); stopped rather than create a snapshot elsewhere or give hooks paths that name the hook's files`);
     }
   }
 

@@ -63,7 +63,11 @@ export async function replay(opts) {
   // Both opened once (round-5 review, ren.sh): snapshots are created and removed through snaps (snapshot.js SnapDir),
   // and teardown removes the root by path only while the path still names the root made here.
   const snaps = new SnapDir(snapDir);
-  const rootDir = new SnapDir(tmp);
+  const rootDir = new SnapDir(tmp, 'temp root');
+  // Before and after each hook run both paths must still name those dirs, else SnapDirError stops the run: a hook
+  // that renamed a directory above the root and rebuilt it at the old path would otherwise be given its own files as
+  // transcript_path, and the check before each create alone misses it once every snapshot exists (round-6, anc.sh).
+  const verifyDirs = () => { snaps.verify(); rootDir.verify(); };
   const live = new Set();
   // Kill what still runs before removing anything: a live hook can recreate files. Then unlink the snapshots still
   // open, through the snap dir fd. rmSync does not follow symlinks (it unlinks them), so a link a hook left in work/
@@ -152,8 +156,10 @@ export async function replay(opts) {
             const cmd = commandArgv(hook, env);
             const argv = wrapperArgv(isolation.wrapper, cmd, { writableFs: !isolation.readonly_fs, root: tmp, work, snap: snapDir, binary: isolation.binary,
               binds: hookBinds(cmd, hidden) });
+            verifyDirs();
             const run = await runHook({ argv, stdin, env, cwd, timeoutMs: t.seconds * 1000, timeoutSource: t.source,
               killGroup: true, extraInput: isolation.filter ? [isolation.filter] : [] });
+            verifyDirs();
             const changed = snap.afterRun();
             const verdict = classify(run, hook);
             results.push({ key: p.key, file: p.file, lineNo: p.lineNo, event: p.event, hookId: id, hook, tool: toolOf(p),

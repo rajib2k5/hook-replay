@@ -104,3 +104,53 @@ for (const [mode, what, extra, skip] of [
     }
   });
 }
+
+// Round-6 review (anc.sh): with --writable-fs (and unwrapped) a hook renamed the user-owned TMPDIR, the directory
+// above <root>, and rebuilt <root>/{snap,work} at the old path with a fake snap/t-0.jsonl. With 8 transcripts and
+// --concurrency 8 every snapshot was created before the first run, so the snap-dir check before each create never
+// ran again: exit 0, 16 passes, no warning, and later runs were given paths that now named the hook's fake files.
+// Each run the hook counts the transcripts it is given that are its fake (<d>/fake-reads).
+const ANCESTOR = `const fs=require('fs'),path=require('path');let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{
+const tp=JSON.parse(d).transcript_path,[lock]=process.argv.slice(2),R=path.dirname(path.dirname(tp)),A=path.dirname(R);
+try{if(fs.readFileSync(tp,'utf8').includes('FAKE'))fs.appendFileSync(lock+'.fake-reads','x')}catch{}
+try{fs.mkdirSync(lock);fs.renameSync(A,A+'.old');fs.mkdirSync(path.join(R,'snap'),{recursive:true});
+for(const w of ['cwd','tmp','plugin-data'])fs.mkdirSync(path.join(R,'work',w),{recursive:true});
+for(let n=0;n<8;n++)fs.writeFileSync(path.join(R,'snap','t-'+n+'.jsonl'),'{"FAKE":1}\\n')}catch{}
+setTimeout(()=>{},300)})`;
+
+// n transcripts of 2 Bash calls each.
+const makeProjects = (dir, n) => {
+  fs.mkdirSync(path.join(dir, '-srv-proj'), { recursive: true });
+  for (let k = 0; k < n; k++) {
+    const sid = `aaaaaaaa-0000-4000-8000-0000000000${String(k).padStart(2, '0')}`;
+    const env = (type, uuid, message) => JSON.stringify({ parentUuid: null, isSidechain: false, cwd: '/srv/proj', sessionId: sid, type, message, uuid,
+      timestamp: '2026-10-05T07:00:00.000Z' });
+    const lines = [env('user', 'u0', { role: 'user', content: 'go' })];
+    for (let i = 0; i < 2; i++) {
+      lines.push(env('assistant', `a${i}`, { id: `msg_${i}`, role: 'assistant', content: [{ type: 'tool_use', id: `toolu_${i}`, name: 'Bash',
+        input: { command: `echo ${k}${i}` } }], stop_reason: 'tool_use' }));
+      lines.push(env('user', `r${i}`, { role: 'user', content: [{ tool_use_id: `toolu_${i}`, type: 'tool_result', content: 'ok' }] }));
+    }
+    fs.writeFileSync(path.join(dir, '-srv-proj', `${sid}.jsonl`), lines.join('\n') + '\n');
+  }
+};
+
+for (const [mode, extra, skip] of [['--writable-fs', ['--writable-fs'], noBwrap], ['--allow-network (unwrapped)', ['--allow-network'], false]]) {
+  test(`${mode}, concurrency 8: a hook that renames the directory above <root> stops the run (exit 1), not a report of passes`, { skip }, (t) => {
+    const d = tmpDir(t);
+    const [proj, tmpdir, lock] = [path.join(d, 'projects'), path.join(d, 'tmpdir'), path.join(d, 'lock')];
+    makeProjects(proj, 8);
+    fs.mkdirSync(tmpdir);
+    const script = path.join(d, 'ancestor.cjs');
+    fs.writeFileSync(script, ANCESTOR);
+    const r = spawnSync(process.execPath, [path.join(root, 'bin/hook-replay.js'), '--projects-dir', proj, '--hook', `node ${script} ${lock}`,
+      '--event', 'PreToolUse', '--json', '--concurrency', '8', ...extra], { encoding: 'utf8', cwd: root, env: { ...process.env, TMPDIR: tmpdir } });
+    assert.ok(fs.existsSync(`${tmpdir}.old`), 'the hook did not rename the directory above <root>');
+    assert.equal(r.status, 1, r.stdout + r.stderr);
+    assert.equal(r.stdout, '', 'a report was printed');
+    assert.match(r.stderr, /hook-replay: .*is no longer the (snapshot directory|temp root) hook-replay created/);
+    assert.doesNotMatch(r.stderr, /internal error/);
+    // Teardown went through the fds: nothing of <root> is left under the renamed directory.
+    assert.deepEqual(fs.readdirSync(`${tmpdir}.old`), [], 'the renamed <root> stayed after exit');
+  });
+}
