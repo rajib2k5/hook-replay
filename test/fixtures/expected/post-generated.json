@@ -1,0 +1,5 @@
+{
+  "_comment": "post-generated.sh, matcher Edit|Write: *.generated.* -> exit 2 (block), .env -> additionalContext (warn). Written from the hook intent.",
+  "-home-fixture-proj/aaaaaaaa-0000-4000-8000-000000000001.jsonl:20:PostToolUse:toolu_A05": {"outcome": "block", "mechanism": "exit2"},
+  "-home-fixture-proj/aaaaaaaa-0000-4000-8000-000000000001.jsonl:22:PostToolUse:toolu_A06": {"outcome": "warn", "mechanism": "additional_context"}
+}
