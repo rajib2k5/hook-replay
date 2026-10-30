@@ -185,7 +185,9 @@ SIGHUP, kill every running hook's process group, remove `<tmp>`, and exit 130, 1
 handled: `<tmp>` then survives (§9).
 Peak disk ≈ concurrency × largest transcript (≈ 4 × 6.6 MB here).
 
-**Dry run** reconstructs, filters, matches, prints counts per hook × tool, runs nothing. **Banner** (stderr,
+**Dry run** reconstructs, filters, matches, prints counts per hook × tool, runs nothing; when `--limit` cut a
+hook's points it says so (`truncated by --limit N: n of m matching points selected`; JSON `truncated`, `matched`).
+`--out` is checked for writability before anything runs (usage error, exit 2). **Banner** (stderr,
 always): command, number of points, isolation, cwd mode, and "replay EXECUTES this hook N times; a hook with side
 effects will perform them N times".
 

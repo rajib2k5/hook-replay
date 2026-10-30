@@ -24,7 +24,7 @@ export async function scan({ files, hooks, filters = {}, includeSubagents = true
   const stats = emptyStats();
   const sessions = new Set();
   const selected = new Map(); // relPath -> Map(pointKey -> [hookId])
-  const perHook = Object.fromEntries(hooks.map(h => [h.id, { points: 0, by_tool: {}, truncated: false }]));
+  const perHook = Object.fromEntries(hooks.map(h => [h.id, { points: 0, matched: 0, by_tool: {}, truncated: false }]));
   let unreadable = 0;
   for (const file of files) {
     // A file we cannot open is counted and skipped; nothing of it is selected, so the run never opens it.
@@ -36,6 +36,7 @@ export async function scan({ files, hooks, filters = {}, includeSubagents = true
       for (const h of hooks) {
         if (!hookApplies(h, p)) continue;
         const ph = perHook[h.id];
+        ph.matched++;
         if (ph.points >= limit) { ph.truncated = true; continue; }
         ph.points++;
         const t = toolOf(p);

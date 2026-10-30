@@ -105,7 +105,7 @@ export function buildReport({ res, hooks, config, redact, samples = 5, now = new
 }
 
 const pad = (rows) => {
-  const w = rows[0].map((_, i) => Math.max(...rows.map(r => String(r[i]).length)));
+  const w = rows[0].map((_, i) => rows.reduce((m, r) => Math.max(m, String(r[i]).length), 0));
   return rows.map(r => r.map((c, i) => i < 3 ? String(c).padEnd(w[i]) : String(c).padStart(w[i])).join('  ').trimEnd()).join('\n');
 };
 const fmt = (x) => x === null ? '-' : String(x);

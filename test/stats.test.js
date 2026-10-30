@@ -29,3 +29,8 @@ test('latencySummary gives n, p50, p95, max', () => {
   assert.deepEqual(latencySummary([4, 1, 3, 2]), { n: 4, p50: 2, p95: 4, max: 4 });
   assert.deepEqual(latencySummary([]), { n: 0, p50: null, p95: null, max: null });
 });
+
+test('latencySummary handles 300k values (no spread into Math.max)', () => {
+  const xs = Array.from({ length: 300000 }, (_, i) => (i * 7919) % 300000);
+  assert.equal(latencySummary(xs).max, 299999);
+});

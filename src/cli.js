@@ -14,7 +14,7 @@ import { makeRedactor, escapeControl } from './redact.js';
 
 export const VERSION = '0.1.0';
 
-const OPTIONS = {
+export const OPTIONS = {
   'projects-dir': { type: 'string' },
   hook: { type: 'string' }, event: { type: 'string' }, matcher: { type: 'string' },
   'hook-timeout': { type: 'string' }, 'on-failure': { type: 'string' },
@@ -37,12 +37,68 @@ const USAGE = `usage: hook-replay (--hook "<cmd>" --event <PreToolUse|PostToolUs
                    [--projects-dir <dir>] [--dry-run] [--json] [--out <file>] [options]
 Runs a Claude Code hook against past sessions' tool calls and reports what it would block, ask or warn on.`;
 
+const HELP = `${USAGE}
+
+Hook (give --hook or --settings):
+  --hook <cmd>            hook command, run as sh -c <cmd>
+  --event <name>          PreToolUse, PostToolUse or Stop (with --hook)
+  --matcher <m>           tool matcher, as in settings.json (not for Stop)
+  --hook-timeout <s>      the hook's own timeout in seconds (default 600)
+  --on-failure <mode>     continue or block, as the onFailure field
+  --settings <file>       run every command hook of a settings.json or plugin hooks.json
+  --ignore-if             run hooks that have an "if" field on every matcher hit (counts are an upper bound)
+  --project-dir <dir>     value of CLAUDE_PROJECT_DIR (default: the current directory)
+  --plugin-root <dir>     value of CLAUDE_PLUGIN_ROOT (needed when a hook references it)
+
+Corpus and filters:
+  --projects-dir <dir>    transcripts to read (default ~/.claude/projects)
+  --project <substr>      only project dirs whose name contains this (repeatable)
+  --session <uuid>        only this session
+  --since <when>          only points at or after an ISO date or Nd (days ago)
+  --until <when>          only points at or before an ISO date or Nd
+  --sample <rate>         keep a deterministic fraction 0..1 of points
+  --limit <n>             at most n points per hook (default 5000)
+  --no-subagents          leave out subagent transcripts and isSidechain lines
+  --max-line-bytes <n>    lines longer than this are not parsed (default 16 MiB)
+
+Execution:
+  --timeout <s>           cap on each run in seconds (default 10)
+  --concurrency <n>       transcripts run in parallel (default 4)
+  --cwd <mode>            temp (default) or recorded: the hook's working directory
+  --env <NAME>            pass this environment variable to hooks (repeatable)
+  --readonly-fs           also make the filesystem read-only for hooks, except the temp dir (needs bwrap)
+  --allow-network         run hooks WITHOUT the sandbox (no isolation at all); report says NOT ISOLATED
+  --dry-run               count what would run, run nothing
+
+Output:
+  --json                  print the JSON report (hook-replay/report@1)
+  --out <file>            also write the JSON report to this file (mode 0600)
+  --samples <n>           samples per flagged outcome per hook (default 5)
+  --show-raw              turn redaction OFF (the report then holds raw transcript text)
+  --fail-on <outcomes>    exit 4 if any of these outcomes occurred (comma-separated)
+
+  -h, --help              this help
+  --version               print the version
+
+Exit codes: 0 report, 1 internal error, 2 usage, 3 no isolation (see --allow-network), 4 --fail-on matched,
+130/143/129 stopped by SIGINT/SIGTERM/SIGHUP.`;
+
 const posInt = (v, name, dflt) => {
   if (v === undefined) return dflt;
   const n = Number(v);
   if (!Number.isInteger(n) || n < 1) throw new UsageError(`${name} must be a positive integer`);
   return n;
 };
+
+// --out is checked before anything runs, so a typo does not cost the whole replay.
+function checkWritable(file) {
+  let st = null;
+  try { st = fs.statSync(file); } catch { /* does not exist yet */ }
+  if (st && st.isDirectory()) throw new UsageError(`--out ${file} is a directory`);
+  try { fs.accessSync(st ? file : path.dirname(file), fs.constants.W_OK); } catch {
+    throw new UsageError(`--out ${file}: ${st ? 'file' : 'directory'} is missing or not writable`);
+  }
+}
 
 export function parseCli(argv) {
   let parsed;
@@ -77,6 +133,7 @@ export function parseCli(argv) {
     const bad = opts.failOn.filter(o => !OUTCOMES.includes(o));
     if (bad.length || !opts.failOn.length) throw new UsageError(`--fail-on takes outcomes from ${OUTCOMES.join(',')}; got ${v['fail-on']}`);
   }
+  if (opts.out !== undefined && !opts.dryRun) checkWritable(path.resolve(opts.out));
   opts.loadWarnings = [];
   if (v.settings) {
     const { hooks, warnings } = loadSettings(path.resolve(v.settings), { ignoreIf: !!v['ignore-if'], pluginRoot: opts.pluginRoot });
@@ -112,7 +169,7 @@ async function run(argv, io, setRedactor) {
     if (e instanceof UsageError) { io.stderr.write(red(`hook-replay: ${e.message}`) + `\n${USAGE}\n`); return 2; }
     throw e;
   }
-  if (opts.help) { io.stdout.write(USAGE + '\n'); return 0; }
+  if (opts.help) { io.stdout.write(HELP + '\n'); return 0; }
   if (opts.version) { io.stdout.write(VERSION + '\n'); return 0; }
   red = setRedactor(makeRedactor({ enabled: !opts.showRaw }));
   for (const w of opts.loadWarnings) io.stderr.write(`hook-replay: warning: ${red(w)}\n`);
@@ -127,6 +184,7 @@ async function run(argv, io, setRedactor) {
       io.stdout.write(`files ${s.corpus.files}  lines ${s.corpus.lines}  sessions ${s.corpus.sessions}\n`);
       io.stdout.write('HOOK EVENT TOOL POINTS\n');
       for (const h of hooks) for (const [tool, n] of Object.entries(h.by_tool)) io.stdout.write(escapeControl(`${h.id} ${h.event} ${tool} ${n}`) + '\n');
+      for (const h of hooks) if (h.truncated) io.stdout.write(`${h.id} truncated by --limit ${opts.limit}: ${h.points} of ${h.matched} matching points selected\n`);
     }
     return 0;
   }

@@ -6,5 +6,7 @@ export function percentile(xs, q) {
 }
 
 export function latencySummary(xs) {
-  return { n: xs.length, p50: percentile(xs, 0.5), p95: percentile(xs, 0.95), max: xs.length ? Math.max(...xs) : null };
+  let max = null;
+  for (const x of xs) if (max === null || x > max) max = x; // no Math.max(...xs): it overflows the stack at ~200k values
+  return { n: xs.length, p50: percentile(xs, 0.5), p95: percentile(xs, 0.95), max };
 }

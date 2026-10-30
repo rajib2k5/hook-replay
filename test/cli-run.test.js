@@ -71,3 +71,27 @@ test('npm pack ships only the files allowlist (no test fixtures)', () => {
   assert.ok(files.includes('bin/hook-replay.js') && files.includes('examples/hooks/deny-rm.js'));
   for (const f of files) assert.match(f, /^(bin\/|src\/|examples\/|docs\/|README\.md$|LICENSE$|package\.json$)/, f);
 });
+
+test('--out into a missing directory is a usage error before anything runs', (t) => {
+  const d = tmpDir(t);
+  const r = cli([...denyRm, '--out', path.join(d, 'no-such-dir', 'report.json')]);
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /--out/);
+  assert.doesNotMatch(r.stderr, /replay EXECUTES/, 'no hook ran');
+});
+
+test('--help lists every option with a description', async () => {
+  const { OPTIONS } = await import('../src/cli.js');
+  const r = cli(['--help']);
+  assert.equal(r.status, 0);
+  for (const name of Object.keys(OPTIONS)) assert.match(r.stdout, new RegExp(`^\\s+(-\\w, )?--${name}\\b.*\\S+\\s{2,}\\S`, 'm'), `--${name}`);
+});
+
+test('--dry-run says when --limit truncated the point set', () => {
+  const human = cli([...denyRm, '--dry-run', '--limit', '3']);
+  assert.equal(human.status, 0, human.stderr);
+  assert.match(human.stdout, /h1 truncated by --limit 3: 3 of 23 matching points selected/);
+  const json = JSON.parse(cli([...denyRm, '--dry-run', '--json', '--limit', '3']).stdout);
+  assert.deepEqual([json.hooks[0].truncated, json.hooks[0].points, json.hooks[0].matched], [true, 3, 23]);
+  assert.doesNotMatch(cli([...denyRm, '--dry-run']).stdout, /truncated/);
+});
