@@ -5,10 +5,11 @@ import path from 'node:path';
 const PENDING_MAX = 10000;
 const PATH_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit']);
 const KNOWN_TYPES = new Set(['user', 'assistant']);
+const PERMISSION_MODES = new Set(['default', 'plan', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions']);
 
 export function emptyStats() {
   return {
-    lines: 0, lines_malformed: 0, lines_oversize: 0,
+    lines: 0, lines_malformed: 0, lines_oversize: 0, orphan_tool_results: 0,
     skipped: { post_tool_use_failure: 0, duplicate_uuid: 0, duplicate_tool_use_id: 0, subagent_excluded: 0 },
     points_by_event: { PreToolUse: 0, PostToolUse: 0, Stop: 0 },
   };
@@ -20,6 +21,7 @@ export class Reconstructor {
     this.ctx = { includeSubagents: true, ...ctx };
     this.stats = stats;
     this.permissionMode = 'default';
+    this.lastCwd = null;
     this.pending = new Map();
     this.seenUuids = new Set();
     this.seenToolUseIds = new Set();
@@ -37,6 +39,7 @@ export class Reconstructor {
     try { o = JSON.parse(line.bytes.toString('utf8')); } catch { this.stats.lines_malformed++; return out; }
     if (o === null || typeof o !== 'object' || Array.isArray(o)) { this.stats.lines_malformed++; return out; }
     if (typeof o.permissionMode === 'string') this.permissionMode = o.permissionMode;
+    if (typeof o.cwd === 'string') this.lastCwd = o.cwd;
     if (!KNOWN_TYPES.has(o.type)) return out;
     if (typeof o.uuid === 'string') {
       if (this.seenUuids.has(o.uuid)) { this.stats.skipped.duplicate_uuid++; return out; }
@@ -57,14 +60,18 @@ export class Reconstructor {
     return out;
   }
 
-  #common(o, event) {
+  // Common payload fields, and the fidelity marks they need. cwd falls back to the last cwd seen in this file
+  // (any line type); agent_id only on subagent lines; an undocumented permission mode becomes "default".
+  #common(o, event, sidechain) {
+    const fidelity = [];
     const p = { session_id: typeof o.sessionId === 'string' ? o.sessionId : this.ctx.sessionUuid };
-    if (typeof o.cwd === 'string') p.cwd = o.cwd;
-    p.permission_mode = this.permissionMode;
+    if (this.lastCwd !== null) p.cwd = this.lastCwd; else fidelity.push('cwd_missing');
+    if (PERMISSION_MODES.has(this.permissionMode)) p.permission_mode = this.permissionMode;
+    else { p.permission_mode = 'default'; fidelity.push('permission_mode_unknown'); }
     p.hook_event_name = event;
-    if (typeof o.agentId === 'string') p.agent_id = o.agentId;
+    if (sidechain && typeof o.agentId === 'string') p.agent_id = o.agentId;
     if (typeof o.promptId === 'string') p.prompt_id = o.promptId;
-    return p;
+    return { p, fidelity };
   }
 
   #emit(pt) {
@@ -100,6 +107,10 @@ export class Reconstructor {
   #assistant(o, line, content, sidechain, out) {
     if (this.pendingStop && !sidechain) { out.push(this.#emit({ ...this.pendingStop, realSignal: 'assistant_continued' })); this.pendingStop = null; }
     const msgId = o.message && o.message.id;
+    if (typeof content === 'string' && content !== '' && msgId !== undefined) {
+      if (!this.msgText.has(msgId)) this.msgText.set(msgId, []);
+      this.msgText.get(msgId).push(content);
+    }
     if (Array.isArray(content)) {
       for (const b of content) {
         if (!b || typeof b !== 'object') continue;
@@ -109,9 +120,10 @@ export class Reconstructor {
         } else if (b.type === 'tool_use' && typeof b.id === 'string') {
           if (this.seenToolUseIds.has(b.id)) { this.stats.skipped.duplicate_tool_use_id++; continue; }
           this.seenToolUseIds.add(b.id);
-          const input = this.#resolveInput(b.name, b.input, o.cwd);
-          const payload = { ...this.#common(o, 'PreToolUse'), tool_name: b.name, tool_input: input, tool_use_id: b.id };
-          const point = this.#point('PreToolUse', line, o, line.offset + line.length + 1, payload, b.id);
+          const input = this.#resolveInput(b.name, b.input, this.lastCwd);
+          const { p: common, fidelity } = this.#common(o, 'PreToolUse', sidechain);
+          const payload = { ...common, tool_name: b.name, tool_input: input, tool_use_id: b.id };
+          const point = this.#point('PreToolUse', line, o, line.offset + line.length + 1, payload, b.id, fidelity);
           this.pending.set(b.id, { name: b.name, input, lineNo: line.lineNo, point });
           if (this.pending.size > PENDING_MAX) {
             const [oldId, oldest] = this.pending.entries().next().value;
@@ -122,13 +134,14 @@ export class Reconstructor {
       }
     }
     if (o.message && o.message.stop_reason === 'end_turn' && !sidechain) {
+      const { p: common, fidelity } = this.#common(o, 'Stop', sidechain);
       const payload = {
-        ...this.#common(o, 'Stop'),
+        ...common,
         stop_hook_active: this.hadStop && !this.promptSinceStop,
         last_assistant_message: (this.msgText.get(msgId) || []).join('\n'),
         background_tasks: [], session_crons: [],
       };
-      this.pendingStop = this.#point('Stop', line, o, line.offset + line.length + 1, payload, null);
+      this.pendingStop = this.#point('Stop', line, o, line.offset + line.length + 1, payload, null, fidelity);
       this.hadStop = true;
       this.promptSinceStop = false;
     }
@@ -144,14 +157,15 @@ export class Reconstructor {
     }
     if (!Array.isArray(content)) return;
     for (const b of content) {
-      if (!b || b.type !== 'tool_result' || !this.pending.has(b.tool_use_id)) continue;
+      if (!b || b.type !== 'tool_result') continue;
+      if (!this.pending.has(b.tool_use_id)) { this.stats.orphan_tool_results++; continue; }
       const p = this.pending.get(b.tool_use_id);
       this.pending.delete(b.tool_use_id);
       const isError = b.is_error === true;
       out.push(this.#emitPre(p, isError ? 'error' : 'ok'));
       if (isError) { this.stats.skipped.post_tool_use_failure++; continue; }
       let response;
-      const fidelity = [];
+      const { p: common, fidelity } = this.#common(o, 'PostToolUse', sidechain);
       if (o.toolUseResult !== null && typeof o.toolUseResult === 'object') response = o.toolUseResult;
       else {
         fidelity.push('tool_response_from_content');
@@ -159,7 +173,7 @@ export class Reconstructor {
         else response = (Array.isArray(b.content) ? b.content : [])
           .filter(c => c && c.type === 'text' && typeof c.text === 'string').map(c => c.text).join('\n');
       }
-      const payload = { ...this.#common(o, 'PostToolUse'), tool_name: p.name, tool_input: p.input, tool_response: response, tool_use_id: b.tool_use_id };
+      const payload = { ...common, tool_name: p.name, tool_input: p.input, tool_response: response, tool_use_id: b.tool_use_id };
       const pt = this.#point('PostToolUse', line, o, line.offset, payload, b.tool_use_id, fidelity);
       pt.realSignal = 'ok';
       out.push(this.#emit(pt));

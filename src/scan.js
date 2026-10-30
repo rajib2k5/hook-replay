@@ -48,6 +48,7 @@ export async function scan({ files, hooks, filters = {}, includeSubagents = true
   }
   const corpus = {
     files: files.length, files_unreadable: unreadable, lines: stats.lines, lines_malformed: stats.lines_malformed, lines_oversize: stats.lines_oversize,
+    orphan_tool_results: stats.orphan_tool_results,
     sessions: sessions.size, points_by_event: stats.points_by_event,
   };
   return { corpus, stats, selected, perHook };

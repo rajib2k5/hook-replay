@@ -43,3 +43,18 @@ for (const mode of ['run', 'dry-run']) {
     assert.ok(!r.stderr.includes(projects), 'no raw path');
   });
 }
+
+test('corpus.orphan_tool_results counts a tool_result that arrives in a later file than its tool_use', (t) => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-orphan-'));
+  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  const proj = path.join(d, 'projects', 'p');
+  fs.mkdirSync(proj, { recursive: true });
+  const line = (o) => JSON.stringify({ sessionId: 's', cwd: '/w', ...o }) + '\n';
+  fs.writeFileSync(path.join(proj, '11111111-0000-4000-8000-000000000001.jsonl'),
+    line({ type: 'assistant', uuid: 'a1', message: { id: 'm1', content: [{ type: 'tool_use', id: 'toolu_X', name: 'Bash', input: { command: 'ls' } }] } }));
+  fs.writeFileSync(path.join(proj, '22222222-0000-4000-8000-000000000002.jsonl'),
+    line({ type: 'user', uuid: 'u1', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_X', content: 'ok' }] } }));
+  const r = cli(path.join(d, 'projects'), ['--dry-run']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).corpus.orphan_tool_results, 1);
+});

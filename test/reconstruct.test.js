@@ -211,3 +211,61 @@ test('pending is bounded at 10,000: the oldest is emitted with none and its late
 test('points_by_event counts every emitted point', () => {
   assert.deepEqual(fixture(A).stats.points_by_event, { PreToolUse: 7, PostToolUse: 5, Stop: 1 });
 });
+
+// Review: silent drops and invented fields.
+test('a tool_result whose tool_use is not pending is counted as orphan_tool_results', () => {
+  const { points, stats } = mem([
+    user('u1', [result('toolu_never', 'x')]),
+    asst('a1', 'm1', [toolUse('toolu_1', 'Bash', { command: 'ls' })], 'tool_use'),
+    user('u2', [result('toolu_1', 'ok')]),
+    user('u3', [result('toolu_1', 'again')]),
+  ]);
+  assert.equal(stats.orphan_tool_results, 2);
+  assert.equal(points.filter(p => p.event === 'PostToolUse').length, 1);
+});
+
+test('assistant message.content as a plain string is the Stop last_assistant_message', () => {
+  const { points } = mem([user('u1', 'hi'), asst('a1', 'm1', 'All done as a string.', 'end_turn')]);
+  assert.equal(points.find(p => p.event === 'Stop').payload.last_assistant_message, 'All done as a string.');
+});
+
+test('a line without cwd uses the last cwd seen in the file (also for relative paths)', () => {
+  const { points } = mem([
+    user('u1', 'hi', { cwd: '/seen/dir' }),
+    asst('a1', 'm1', [toolUse('toolu_1', 'Read', { file_path: 'rel.txt' })], 'tool_use', { cwd: undefined }),
+    user('u2', [result('toolu_1', 'ok')], { cwd: undefined }),
+  ]);
+  for (const p of points) {
+    assert.equal(p.payload.cwd, '/seen/dir', p.key);
+    assert.deepEqual(p.fidelity.filter(f => f === 'cwd_missing'), [], p.key);
+  }
+  assert.equal(points[0].payload.tool_input.file_path, '/seen/dir/rel.txt');
+});
+
+test('with no cwd anywhere in the file, cwd is omitted and the point carries fidelity cwd_missing', () => {
+  const { points } = mem([
+    user('u1', 'hi', { cwd: undefined }),
+    asst('a1', 'm1', [toolUse('toolu_1', 'Bash', { command: 'ls' })], 'tool_use', { cwd: undefined }),
+    user('u2', [result('toolu_1', 'ok')], { cwd: undefined }),
+    asst('a2', 'm2', [{ type: 'text', text: 'done' }], 'end_turn', { cwd: undefined }),
+  ]);
+  assert.deepEqual(points.map(p => [p.event, 'cwd' in p.payload, p.fidelity.includes('cwd_missing')]),
+    [['PreToolUse', false, true], ['PostToolUse', false, true], ['Stop', false, true]]);
+});
+
+test('agent_id only for subagent files and isSidechain lines, not for a main-session line that carries agentId', () => {
+  const lines = (sidechain) => [asst('a1', 'm1', [toolUse('toolu_1', 'Bash', { command: 'ls' })], 'tool_use', { agentId: 'agentX', isSidechain: sidechain })];
+  assert.equal('agent_id' in mem(lines(false)).points[0].payload, false);
+  assert.equal(mem(lines(true)).points[0].payload.agent_id, 'agentX');
+  assert.equal(mem(lines(false), { subagent: true }).points[0].payload.agent_id, 'agentX');
+});
+
+test('permission_mode outside the documented set becomes "default" with fidelity permission_mode_unknown', () => {
+  const run = (mode) => mem([{ type: 'system', permissionMode: mode }, asst('a1', 'm1', [toolUse('toolu_1', 'Bash', { command: 'ls' })], 'tool_use')]).points[0];
+  const weird = run('weirdMode');
+  assert.deepEqual([weird.payload.permission_mode, weird.fidelity.includes('permission_mode_unknown')], ['default', true]);
+  for (const m of ['default', 'plan', 'acceptEdits', 'auto', 'dontAsk', 'bypassPermissions']) {
+    const p = run(m);
+    assert.deepEqual([p.payload.permission_mode, p.fidelity.includes('permission_mode_unknown')], [m, false], m);
+  }
+});

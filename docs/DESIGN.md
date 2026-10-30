@@ -52,12 +52,16 @@ skipped; the run goes on.
 Over `--max-line-bytes` (default 16 MiB): `bytes: null`, counted `lines_oversize`, still in the byte prefix. A last
 line without `\n` is ignored (partial write). Parse failure or non-object → `lines_malformed`; unknown `type` → skip.
 
-**Session state** (per file): `permissionMode` (last `permissionMode` seen on any line, default `"default"`);
+**Session state** (per file): `permissionMode` (last `permissionMode` seen on any line, default `"default"`; a
+value outside `default plan acceptEdits auto dontAsk bypassPermissions` is emitted as `"default"` with fidelity
+`permission_mode_unknown`); `lastCwd` (last `cwd` seen on any line);
 `pending: Map<tool_use_id,{name,input,lineNo}>`; `seenUuids`, `seenToolUseIds` (dedupe of rewritten lines, first
 wins); `msgText: Map<message.id,string[]>`; last Stop index and whether a real user prompt followed it.
 
 **Common fields:** `session_id` (envelope `sessionId`, else the uuid in the path), `transcript_path` (snapshot,
-§5), `cwd` (envelope), `permission_mode`, `hook_event_name`, `agent_id` (envelope `agentId` if present). Never
+§5), `cwd` (envelope, else the last `cwd` seen in the file, else omitted with fidelity `cwd_missing`; see
+Deviations), `permission_mode`, `hook_event_name`, `agent_id` (envelope `agentId`, only on subagent lines: a file
+under `subagents/` or a line with `isSidechain:true`). Never
 invented: `prompt_id` (unless envelope `promptId`), `scratchpad_dir`, `effort`, `agent_type`, `mcp_server`, `duration_ms`.
 
 **PreToolUse** — each `assistant` line, each content block `{type:'tool_use', id, name, input}` with `id` not yet
@@ -68,14 +72,16 @@ the matching result arrives (`ok` / `error` if `is_error===true`), else `none` a
 only after their result or EOF. Bound: if `pending` exceeds 10,000 entries, emit the oldest with `none`.
 
 **PostToolUse** — each `user` line, each block `{type:'tool_result', tool_use_id, is_error}` whose id is in
-`pending`, and only if `is_error !== true` (an error fires PostToolUseFailure, out of scope; count it as
+`pending` (a result whose id is not pending — its tool_use is in another file, comes later, or was already
+answered — is counted as `corpus.orphan_tool_results`), and only if `is_error !== true` (an error fires PostToolUseFailure, out of scope; count it as
 `skipped.post_tool_use_failure`). `tool_response` = top-level `toolUseResult` when it is a non-null object; else
 the block's `content` if a string; else the `text` of its text blocks joined with `\n`; mark fidelity
 `tool_response_from_content` in the last two cases. `snapshotEnd` = start of this line (the hook ran before
 the result was written) **(our choice)**.
 
 **Stop** — an `assistant` line with `message.stop_reason === "end_turn"` in a **main** transcript, not
-`isSidechain`. `last_assistant_message` = `msgText[message.id].join('\n')` **(our choice of separator)**.
+`isSidechain`. `last_assistant_message` = `msgText[message.id].join('\n')` **(our choice of separator)**; an
+assistant `message.content` that is a plain string counts as one text block.
 `stop_hook_active` = `true` iff a previous Stop point exists in this file and no real user prompt (a `user` line
 whose `message.content` is a string or only text blocks, no `isMeta`, no `tool_result`) came between them.
 `background_tasks: []`, `session_crons: []`. `snapshotEnd` = end of this line. `realSignal`: what follows
@@ -407,3 +413,6 @@ Smallest fixes where the text above was self-contradictory or did not work as wr
 4. **§3 / §5 reading.** The banner must state N before anything runs and `--limit` needs a deterministic global
    order, so the corpus is reconstructed twice: a scan that keeps only point keys, then the run. `--sample` still
    needs no extra pass of its own.
+5. **§3 `cwd`.** "cwd (envelope)" left `cwd` out of the payload whenever a line lacked it, which no live hook
+   would see. Implemented: the line's `cwd`, else the last `cwd` seen in the same file (any line type), else the
+   key is omitted and the point carries fidelity `cwd_missing`. Relative `file_path`s resolve against the same value.
