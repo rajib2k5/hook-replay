@@ -125,10 +125,10 @@ export function renderHuman(m) {
     `  redaction ${m.redacted ? 'on' : 'OFF'}  project-dir ${m.config.project_dir}`);
   for (const w of m.warnings) out.push(`warning: ${w}`);
   out.push('');
-  const rows = [['HOOK', 'EVENT', 'MATCHER', 'RUNS', 'BLOCK', 'ASK', 'WARN', 'STOP', 'DEFER', 'ERROR', 'TIMEOUT', 'RTO', 'P50ms', 'P95ms', 'MAXms']];
+  const rows = [['HOOK', 'EVENT', 'MATCHER', 'RUNS', 'BLOCK', 'ASK', 'WARN', 'STOP', 'DEFER', 'ALLOW', 'ERROR', 'TIMEOUT', 'RTO', 'P50ms', 'P95ms', 'MAXms']];
   for (const h of m.hooks) {
     const c = h.counts;
-    rows.push([h.id, h.event, h.matcher ?? '-', h.runs, c.block, c.ask, c.warn, c.stop, c.defer, c.error, c.timeout, c.replay_timeout,
+    rows.push([h.id, h.event, h.matcher ?? '-', h.runs, c.block, c.ask, c.warn, c.stop, c.defer, c.allow, c.error, c.timeout, c.replay_timeout,
       fmt(h.latency_ms.p50), fmt(h.latency_ms.p95), fmt(h.latency_ms.max)]);
   }
   out.push(pad(rows));

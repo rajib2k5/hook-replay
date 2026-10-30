@@ -103,8 +103,8 @@ test('JSON@1 top-level shape', () => {
 test('human output has the table row and escapes control characters from transcripts', () => {
   const m = build([mk(1, 'block', { reason: 'hook said \x1b[31mred' }), mk(2, 'ask'), mk(3, 'pass')]);
   const out = renderHuman(m);
-  assert.match(out, /HOOK\s+EVENT\s+MATCHER\s+RUNS\s+BLOCK\s+ASK\s+WARN\s+STOP\s+DEFER\s+ERROR\s+TIMEOUT\s+RTO\s+P50ms\s+P95ms\s+MAXms/);
-  assert.match(out, /h1\s+PreToolUse\s+Bash\s+3\s+1\s+1\s+0\s+0\s+0\s+0\s+0\s+0\s+2\s+3\s+3/);
+  assert.match(out, /HOOK\s+EVENT\s+MATCHER\s+RUNS\s+BLOCK\s+ASK\s+WARN\s+STOP\s+DEFER\s+ALLOW\s+ERROR\s+TIMEOUT\s+RTO\s+P50ms\s+P95ms\s+MAXms/);
+  assert.match(out, /h1\s+PreToolUse\s+Bash\s+3\s+1\s+1\s+0\s+0\s+0\s+0\s+0\s+0\s+0\s+2\s+3\s+3/);
   assert.ok(!out.includes('\x1b'));
   assert.match(out, /\\x1b\[31mred/);
 });
@@ -132,4 +132,9 @@ test('sample excerpts: a private key that runs past the 300-char cut is redacted
   const m = build([mk(1, 'block', { input: { command: `${'y'.repeat(250)} ${pem}` }, reason: `${'z'.repeat(280)} ${pem}` })]);
   const s = m.hooks[0].samples[0];
   assert.ok(!s.tool_input.includes('r3PemBody8834') && !s.reason.includes('r3PemBody8834'));
+});
+
+test('human table: the ALLOW column counts explicit allows', () => {
+  const out = renderHuman(build([mk(1, 'allow'), mk(2, 'allow'), mk(3, 'pass'), mk(4, 'block')]));
+  assert.match(out, /\nh1\s+PreToolUse\s+Bash\s+4\s+1\s+0\s+0\s+0\s+0\s+2\s+0\s+0\s+0\s/);
 });
