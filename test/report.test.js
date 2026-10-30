@@ -16,7 +16,7 @@ const mk = (i, outcome, o = {}) => ({
 const res = (results) => ({
   results, corpus: { files: 1, lines: 10, lines_malformed: 0, lines_oversize: 0, sessions: 1, points_by_event: { PreToolUse: results.length, PostToolUse: 0, Stop: 0 } },
   perHook: { h1: { points: results.length, by_tool: {}, truncated: false } },
-  isolation: { network: 'unshare', readonly_fs: false, probe: 'unshare: only lo visible' }, sandboxOverheadMs: { p50: 0.5, p95: 1 },
+  isolation: { network: 'unshare', readonly_fs: false, probe: 'unshare: only lo visible' }, sandboxOverheadMs: { wrapped: { p50: 6.5, p95: 9 }, unwrapped: { p50: 1, p95: 2 } },
 });
 const build = (results, extra = {}) => buildReport({ res: res(results), hooks: [hook], config: { timeout_s: 10, concurrency: 4, cwd_mode: 'temp', project_dir: '/home/fixture/p', filters: {}, sample: null, limit: 5000 },
   redact: makeRedactor({ homedir: '/home/fixture', username: 'fixture' }), samples: 2, now: '2026-10-29T00:00:00.000Z', warnings: [], ...extra });
@@ -29,6 +29,33 @@ test('counts, by_tool, mechanisms and flagged_real_ok per hook', () => {
   assert.deepEqual(h.by_tool, { Bash: { pass: 1, allow: 1, block: 2 }, Read: { ask: 1 } });
   assert.deepEqual(h.mechanisms, { permission_decision: 4, exit0: 1 });
   assert.equal(h.flagged_real_ok, 2);
+  assert.equal(h.flagged_real_user_prompt, 0);
+});
+
+test('Stop: flagged points after which the session waited for the user are counted and named in the human output', () => {
+  const stopHook = { ...hook, event: 'Stop', matcher: undefined };
+  const st = (i, outcome, real) => ({ ...mk(i, outcome, { real }), event: 'Stop', hook: stopHook, tool: '-',
+    payload: { last_assistant_message: `done ${i}` } });
+  const m = buildReport({ res: res([st(1, 'block', 'user_prompt'), st(2, 'block', 'assistant_continued'), st(3, 'pass', 'user_prompt'), st(4, 'stop', 'user_prompt')]),
+    hooks: [stopHook], config: { timeout_s: 10, concurrency: 4, cwd_mode: 'temp', project_dir: '/p', filters: {}, sample: null, limit: 5000 },
+    redact: makeRedactor({ homedir: '/home/fixture', username: 'fixture' }), now: '2026-10-29T00:00:00.000Z' });
+  assert.deepEqual([m.hooks[0].flagged_real_ok, m.hooks[0].flagged_real_user_prompt], [0, 2]);
+  assert.match(renderHuman(m), /\nflagged and the session then waited for the user \(candidate false positives\): 2\n/);
+  assert.doesNotMatch(renderHuman(m), /flagged and the real call succeeded/);
+});
+
+test('human output prints both sandbox timing distributions', () => {
+  assert.match(renderHuman(build([mk(1, 'pass')])), /sandbox: `true` took p50 6\.5 ms, p95 9 ms wrapped; p50 1 ms, p95 2 ms unwrapped/);
+});
+
+test('by_tool holds only tools this hook ran on, each with a non-empty count', () => {
+  const tools = Array.from({ length: 40 }, (_, i) => `mcp__t${i}__x`);
+  const m = build([...tools.map((t, i) => mk(i + 1, i % 2 ? 'pass' : 'block', { tool: t }))]);
+  assert.deepEqual(Object.keys(m.hooks[0].by_tool).sort(), [...tools].sort());
+  assert.ok(Object.values(m.hooks[0].by_tool).every(c => Object.keys(c).length > 0 && Object.values(c).every(n => n > 0)));
+  const human = renderHuman(m).split('\n').find(l => l.startsWith('top tools by flagged count: '));
+  assert.equal(human.split(', ').length, 10);
+  assert.ok(!/ 0(,|$)/.test(human));
 });
 
 test('latency is over runs that exited, not timeouts', () => {
@@ -69,7 +96,7 @@ test('JSON@1 top-level shape', () => {
   assert.equal(SCHEMA, 'hook-replay/report@1');
   assert.deepEqual(Object.keys(m), ['schema', 'tool_version', 'generated_at', 'redacted', 'isolation', 'config', 'corpus', 'sandbox_overhead_ms', 'warnings', 'hooks']);
   assert.deepEqual(Object.keys(m.hooks[0]), ['id', 'key', 'event', 'matcher', 'command', 'source', 'if_ignored', 'runs', 'truncated', 'counts', 'by_tool',
-    'mechanisms', 'flagged_real_ok', 'latency_ms', 'samples']);
+    'mechanisms', 'flagged_real_ok', 'flagged_real_user_prompt', 'latency_ms', 'samples']);
   assert.ok(m.warnings.some(w => /counterfactual/i.test(w)));
 });
 

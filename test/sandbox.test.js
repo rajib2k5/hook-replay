@@ -10,7 +10,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { replay } from '../src/replay.js';
 import { hookFromFlags } from '../src/hooks.js';
-import { probe, wrapperArgv, chooseIsolation, seccompFilter, hostAddress, hookBinds, IsolationError } from '../src/sandbox.js';
+import { probe, wrapperArgv, chooseIsolation, seccompFilter, hostAddress, hookBinds, measureOverhead, IsolationError } from '../src/sandbox.js';
 import { program, encode } from '../src/seccomp.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -252,7 +252,19 @@ test('--readonly-fs with --allow-network is refused', async (t) => {
 
 test('sandbox overhead is measured and reported as p50/p95 ms', { skip }, async () => {
   const res = await runOne({ hook: 'true' });
-  assert.equal(typeof res.sandboxOverheadMs.p50, 'number');
-  assert.equal(typeof res.sandboxOverheadMs.p95, 'number');
+  for (const side of ['wrapped', 'unwrapped']) {
+    const { p50, p95 } = res.sandboxOverheadMs[side];
+    assert.ok(typeof p50 === 'number' && p50 >= 0 && p95 >= p50, `${side} ${p50} ${p95}`);
+  }
   assert.equal(fs.existsSync(res.tmpDir), false, 'temp root removed');
+});
+
+test('sandbox overhead: wrapped and unwrapped `true` are reported as two distributions, never a difference of percentiles', async () => {
+  // Timings where p95(wrapped) - p95(unwrapped) < 0 < p50(wrapped) - p50(unwrapped): the old report was inverted.
+  const plain = [...Array(18).fill(1), 30, 30];
+  const wrapped = [...Array(18).fill(20), 21, 21];
+  const time = async (argv) => (argv[0] === 'true' ? plain : wrapped);
+  const o = await measureOverhead({ wrapper: 'bwrap', filter: Buffer.alloc(0) }, { tmp: '/nonexistent', time });
+  assert.deepEqual(o, { wrapped: { p50: 20, p95: 21 }, unwrapped: { p50: 1, p95: 30 } });
+  assert.equal(await measureOverhead({ wrapper: null }, { tmp: '/nonexistent', time }), null);
 });

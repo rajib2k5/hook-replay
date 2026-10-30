@@ -118,19 +118,22 @@ export async function chooseIsolation({ allowNetwork = false, readonlyFs = false
   return { network: 'bwrap', wrapper: 'bwrap', binary: bin, readonly_fs: readonlyFs, probe: r.reason, filter };
 }
 
-// Wrapped minus unwrapped latency of `true`, 20 runs each.
-export async function measureOverhead(isolation, { tmp, runs = 20 } = {}) {
-  if (!isolation.wrapper) return { p50: 0, p95: 0 };
-  const time = async (argv, extraInput) => {
+// Latency of `true`, 20 runs unwrapped and 20 wrapped, reported as two distributions. Differences of percentiles
+// of two independent samples can come out inverted (p95 < p50) or negative, so none is reported. null unwrapped.
+// `time(argv, extraInput)` returns the latencies of `runs` runs (tests inject it).
+export async function measureOverhead(isolation, { tmp, runs = 20, time } = {}) {
+  if (!isolation.wrapper) return null;
+  const timeRuns = time ?? (async (argv, extraInput) => {
     const xs = [];
     for (let i = 0; i < runs; i++) {
       const r = await runHook({ argv, stdin: '', env: { PATH: process.env.PATH }, cwd: tmp, timeoutMs: 5000, timeoutSource: 'replay_cap', extraInput });
       xs.push(r.latencyMs);
     }
     return xs;
-  };
-  const plain = await time(['true'], []);
-  const wrapped = await time(wrapperArgv(isolation.wrapper, ['true'], { readonlyFs: isolation.readonly_fs, tmp, binary: isolation.binary }), [isolation.filter]);
+  });
   const round = (x) => Math.round(x * 100) / 100;
-  return { p50: round(percentile(wrapped, 0.5) - percentile(plain, 0.5)), p95: round(percentile(wrapped, 0.95) - percentile(plain, 0.95)) };
+  const summary = (xs) => ({ p50: round(percentile(xs, 0.5)), p95: round(percentile(xs, 0.95)) });
+  const unwrapped = summary(await timeRuns(['true'], []));
+  const wrapped = summary(await timeRuns(wrapperArgv(isolation.wrapper, ['true'], { readonlyFs: isolation.readonly_fs, tmp, binary: isolation.binary }), [isolation.filter]));
+  return { wrapped, unwrapped };
 }
