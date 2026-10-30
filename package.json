@@ -1,0 +1,25 @@
+{
+  "name": "hook-replay",
+  "version": "0.1.0",
+  "description": "Run a Claude Code hook against your past sessions' tool calls before you turn it on.",
+  "type": "module",
+  "private": false,
+  "license": "MIT",
+  "bin": {
+    "hook-replay": "bin/hook-replay.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "examples/",
+    "README.md",
+    "LICENSE",
+    "docs/"
+  ]
+}

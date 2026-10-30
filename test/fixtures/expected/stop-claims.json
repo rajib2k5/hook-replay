@@ -1,0 +1,10 @@
+{
+  "_comment": "stop-claims.js with --hook-timeout 1: a tests-pass claim without test output in the same turn -> additionalContext (block on Stop); stop_hook_active -> silent; FIXTURE_SLOW -> the hook own timeout. Written from the hook intent.",
+  "-home-fixture-proj/aaaaaaaa-0000-4000-8000-000000000001.jsonl:14:Stop:": {"outcome": "pass", "mechanism": "exit0"},
+  "-home-fixture-proj/bbbbbbbb-0000-4000-8000-000000000002.jsonl:6:Stop:": {"outcome": "pass", "mechanism": "exit0"},
+  "-home-fixture-proj/eeeeeeee-0000-4000-8000-000000000005.jsonl:5:Stop:": {"outcome": "pass", "mechanism": "exit0"},
+  "-home-fixture-proj/eeeeeeee-0000-4000-8000-000000000005.jsonl:8:Stop:": {"outcome": "block", "mechanism": "additional_context"},
+  "-home-fixture-proj/eeeeeeee-0000-4000-8000-000000000005.jsonl:10:Stop:": {"outcome": "pass", "mechanism": "exit0"},
+  "-home-fixture-proj/eeeeeeee-0000-4000-8000-000000000005.jsonl:13:Stop:": {"outcome": "pass", "mechanism": "exit0"},
+  "-home-fixture-proj/eeeeeeee-0000-4000-8000-000000000005.jsonl:15:Stop:": {"outcome": "timeout", "mechanism": "hook_timeout"}
+}
