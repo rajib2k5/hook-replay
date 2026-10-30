@@ -269,3 +269,11 @@ test('permission_mode outside the documented set becomes "default" with fidelity
     assert.deepEqual([p.payload.permission_mode, p.fidelity.includes('permission_mode_unknown')], [m, false], m);
   }
 });
+
+test('an end_turn assistant line without message.id: its own text is last_assistant_message, marked message_id_missing', () => {
+  const { points } = mem([user('u1', 'hi'), asst('a0', undefined, 'earlier line'), asst('a1', undefined, 'Done without an id.', 'end_turn'),
+    user('u2', 'next'), asst('a2', undefined, [{ type: 'text', text: 'Block text, no id.' }], 'end_turn')]);
+  const stops = points.filter(p => p.event === 'Stop');
+  assert.deepEqual(stops.map(p => [p.payload.last_assistant_message, p.fidelity.includes('message_id_missing')]),
+    [['Done without an id.', true], ['Block text, no id.', true]]);
+});

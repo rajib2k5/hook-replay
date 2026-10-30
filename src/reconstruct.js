@@ -106,17 +106,17 @@ export class Reconstructor {
 
   #assistant(o, line, content, sidechain, out) {
     if (this.pendingStop && !sidechain) { out.push(this.#emit({ ...this.pendingStop, realSignal: 'assistant_continued' })); this.pendingStop = null; }
-    const msgId = o.message && o.message.id;
-    if (typeof content === 'string' && content !== '' && msgId !== undefined) {
-      if (!this.msgText.has(msgId)) this.msgText.set(msgId, []);
-      this.msgText.get(msgId).push(content);
-    }
+    // A line without message.id cannot be grouped with others: its text is keyed by the line alone, so an end_turn
+    // line still carries its own text (and the Stop point says message_id_missing).
+    const hasId = o.message && o.message.id !== undefined && o.message.id !== null;
+    const msgId = hasId ? o.message.id : null;
+    const texts = hasId ? (this.msgText.get(msgId) ?? this.msgText.set(msgId, []).get(msgId)) : [];
+    if (typeof content === 'string' && content !== '') texts.push(content);
     if (Array.isArray(content)) {
       for (const b of content) {
         if (!b || typeof b !== 'object') continue;
-        if (b.type === 'text' && typeof b.text === 'string' && msgId !== undefined) {
-          if (!this.msgText.has(msgId)) this.msgText.set(msgId, []);
-          this.msgText.get(msgId).push(b.text);
+        if (b.type === 'text' && typeof b.text === 'string') {
+          texts.push(b.text);
         } else if (b.type === 'tool_use' && typeof b.id === 'string') {
           if (this.seenToolUseIds.has(b.id)) { this.stats.skipped.duplicate_tool_use_id++; continue; }
           this.seenToolUseIds.add(b.id);
@@ -135,10 +135,11 @@ export class Reconstructor {
     }
     if (o.message && o.message.stop_reason === 'end_turn' && !sidechain) {
       const { p: common, fidelity } = this.#common(o, 'Stop', sidechain);
+      if (!hasId) fidelity.push('message_id_missing');
       const payload = {
         ...common,
         stop_hook_active: this.hadStop && !this.promptSinceStop,
-        last_assistant_message: (this.msgText.get(msgId) || []).join('\n'),
+        last_assistant_message: texts.join('\n'),
         background_tasks: [], session_crons: [],
       };
       this.pendingStop = this.#point('Stop', line, o, line.offset + line.length + 1, payload, null, fidelity);
