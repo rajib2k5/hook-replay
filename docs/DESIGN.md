@@ -81,7 +81,8 @@ the result was written) **(our choice)**.
 
 **Stop** — an `assistant` line with `message.stop_reason === "end_turn"` in a **main** transcript, not
 `isSidechain`. `last_assistant_message` = `msgText[message.id].join('\n')` **(our choice of separator)**; an
-assistant `message.content` that is a plain string counts as one text block.
+assistant `message.content` that is a plain string counts as one text block. A line without `message.id` uses
+its own text only, and the Stop point carries fidelity `message_id_missing`.
 `stop_hook_active` = `true` iff a previous Stop point exists in this file and no real user prompt (a `user` line
 whose `message.content` is a string or only text blocks, no `isMeta`, no `tool_result`) came between them.
 `background_tasks: []`, `session_crons: []`. `snapshotEnd` = end of this line. `realSignal`: what follows
@@ -124,11 +125,17 @@ All three are exported as env vars; in exec form (`args` set) they are also subs
 **Command.** Shell form: `sh -c <command>`, or `bash -c <command>` when the settings hook sets `"shell": "bash"`
 (`"powershell"` and any other value are skipped with a warning; `shell` is ignored when `args` is set). Exec form:
 `command` resolved on PATH, `args` as argv. Wrapped (bwrap only; `unshare` was rejected after review, see ADR-0001):
-- `bwrap --dev-bind / / --proc /proc --unshare-all --new-session --die-with-parent --seccomp 3 -- <argv>`;
-  with `--readonly-fs`: `bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp [--ro-bind <f> <f>]...
-  --bind <tmp> <tmp> --unshare-all --new-session --die-with-parent --seccomp 3 -- <argv>`, where each `<f>` is an
-  existing file under `/tmp` that the hook command names (so a hook script kept in `/tmp` still runs; files beside
-  it are not visible). `--readonly-fs` with `--allow-network` is refused.
+- Default (read-only filesystem): `bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp
+  [--tmpfs /run/user/<uid>] [--ro-bind <f> <f>]... --bind <tmp> <tmp> --unshare-all --new-session
+  --die-with-parent --seccomp 3 -- <argv>`. `--dev` gives a fresh `/dev` (no host `/dev/pts/*` terminals, a private
+  `/dev/shm`); the tmpfs on `/tmp` hides host FIFOs and sockets there; the tmpfs on `/run/user/<uid>` (when it
+  exists) hides D-Bus and other session sockets. Each `<f>` is an existing file under a hidden dir (`/tmp`,
+  `/run/user/<uid>`) that the hook command names, so a hook script kept there still runs; files beside it are not
+  visible. So a hook cannot rewrite `~/.claude/settings.json`, `~/.bashrc` or `~/.config/systemd/user/` and get
+  code run later outside the sandbox.
+- `--writable-fs` (opt-out, prints a warning on stderr and in the report): `--bind / /` instead of
+  `--ro-bind / /`, no tmpfs on `/tmp`; still `--dev /dev` and the tmpfs on `/run/user/<uid>`. `--readonly-fs` is
+  accepted as a deprecated no-op.
 - `--unshare-all` gives new user, network, pid, ipc, uts and cgroup namespaces. `--new-session` stops a hook from
   injecting input into the terminal. The bwrap binary is resolved on PATH once, at start.
 - **seccomp** (`src/seccomp.js`, classic BPF built in JS, no dependencies, handed to bwrap on a fresh pipe as fd 3
@@ -140,20 +147,27 @@ All three are exported as env vars; in exec form (`args` set) they are also subs
   aarch64 (`AUDIT_ARCH_AARCH64` 0xC00000B7, socket 198, io_uring_setup 425) and x86_64 (`AUDIT_ARCH_X86_64`
   0xC000003E, socket 41, io_uring_setup 425, and every x32 syscall, nr ≥ 0x40000000, fails with `EACCES`). Any
   other architecture: no isolation (exit 3 unless `--allow-network`). The x86_64 program is tested only against
-  hand-derived bytes; it has not run on an x86_64 kernel.
+  hand-derived bytes; it has not run on an x86_64 kernel. On the aarch64 test host, `socket()` → `EACCES` and
+  `io_uring_setup()` → `ENOSYS` are tested by behaviour (the latter with python3 ctypes); the x32 and
+  wrong-architecture kill rules are verified only by bytes.
 
 The pid namespace kills a daemonising hook with the sandbox. Measured here: `setsid sleep &` inside the hook
 died at timeout. Death by signal is reported as `128+N` (bwrap is PID 1 in the namespace, so a hook's own
 signals behave as normal); exit codes pass through.
 
 **Isolation probe** (once, at start; fails closed). Under the exact wrapper and filter: (1) connect to a Unix
-socket the probe listens on in its temp dir, (2) TCP connect to a listener the probe opens on `127.0.0.1` and on
-the first non-loopback host address (if any); every attempt must fail and no listener may see a connection;
-(3) the wrapper must exit 0 for `true` and for the probe client. Any other result (including a timeout or
+socket the probe listens on in the temp root (bound into the sandbox in every mode, so only seccomp can stop the
+connect), (2) TCP connect to a listener the probe opens on `127.0.0.1` and on the first non-loopback host address
+(if any); every attempt must fail with `EACCES` (the seccomp result; `ENOENT` or `ECONNREFUSED` would only show a
+hidden path or an empty network namespace) and no listener may see a connection; (3) the wrapper must exit 0 for
+`true` and for the probe client; (4) positive control: the same client run unwrapped must connect to every
+listener. Any other result (including a timeout or
 unparseable output) means not isolated: exit 3 with the reason. `--allow-network` skips the probe and runs every
 hook **unwrapped** (no namespaces, no seccomp); the banner, the report header and the JSON say
-`network: "NOT ISOLATED"`. Non-Linux always needs `--allow-network`. Wrapper overhead (20 runs of `true`, wrapped
-minus unwrapped) is reported as `sandbox_overhead_ms`.
+`network: "NOT ISOLATED"`. Non-Linux always needs `--allow-network`. Wrapper cost: 20 runs of `true` unwrapped and 20
+wrapped, reported as two distributions `sandbox_overhead_ms{wrapped{p50,p95}, unwrapped{p50,p95}}` (null
+unwrapped). A difference of percentiles of two independent samples can be negative or inverted, so none is
+reported.
 
 **Process.** stdin = `JSON.stringify(payload)` then close; EPIPE on stdin is ignored. cwd = `<tmp>/cwd`
 (one shared dir per run) by default; `--cwd recorded` uses the payload `cwd` if it is an existing directory,
@@ -164,7 +178,8 @@ as destructive-guard decide on `os.homedir()`. Stdout and stderr captured up to 
 
 **Timeout.** `min(hook.timeoutS, --timeout)`, `--timeout` default 10 s; `timeoutSource` = `hook` if `hook.timeoutS ≤
 --timeout` else `replay_cap`. Every hook runs in its own process group; on expiry SIGKILL the group (under bwrap
-this kills the namespace; unwrapped it kills children that did not leave the group, but not a `setsid` child). After exit, wait ≤ 100 ms for
+this kills the namespace; unwrapped it kills children that did not leave the group, but not a `setsid` child: with `--allow-network` there
+is no pid namespace, and a `setsid` child also survives SIGINT/SIGTERM/SIGHUP of hook-replay, §9). After exit, wait ≤ 100 ms for
 pipes to close, then destroy them.
 
 **Scheduling.** Points of one transcript run one at a time in emission order (§3), so one snapshot file per
@@ -254,14 +269,16 @@ of that hash, stable for a later `--labels` file), session, line, timestamp, too
 `tool_input` and reason/stderr, exit code, latency, fidelity flags, and the **real-session signal** (Pre: did
 the real call run `ok`/`error`/`none`; Stop: what came next). Report wording: "the real session ran this call
 and it succeeded; if that was fine, this flag is a candidate false positive" — evidence, never a verdict.
-Per hook also the count `flagged ∧ real=ok`.
+Per hook also the count `flagged ∧ real=ok` (`flagged_real_ok`) and, for Stop, `flagged ∧ real=user_prompt`
+(`flagged_real_user_prompt`: the session stopped and waited for the user, so a block or stop there is a candidate
+false positive); the human output prints the Stop one for Stop hooks. `by_tool` holds only tools the hook ran on.
 
 **Human output** (stdout, default): header (version, points, sessions, isolation, cwd mode, redaction on/off,
 `--project-dir`, warnings), the table below, then per hook the top 10 tools by flagged count, error mechanisms
 with counts, and samples.
 ```
-HOOK EVENT       MATCHER RUNS  BLOCK ASK  WARN STOP DEFER ERROR TIMEOUT RTO  P50ms P95ms MAXms
-h1   PreToolUse  Bash    2310      4   37    0    0     0     0       0   0     21    30   112
+HOOK EVENT       MATCHER RUNS  BLOCK ASK  WARN STOP DEFER ALLOW ERROR TIMEOUT RTO  P50ms P95ms MAXms
+h1   PreToolUse  Bash    2310      4   37    0    0     0     9     0       0   0     21    30   112
 ```
 
 **Latency.** Over runs that exited (not timeouts). Nearest rank: sort ascending, `p(q) = xs[ceil(q·n) − 1]`;
@@ -271,9 +288,9 @@ h1   PreToolUse  Bash    2310      4   37    0    0     0     0       0   0     
 fields keeps `@1`, removing or changing meaning bumps it. Top level: `schema, tool_version, generated_at,
 redacted, isolation{network:'bwrap'|'NOT ISOLATED', readonly_fs, probe}, config{timeout_s,
 concurrency, cwd_mode, project_dir, filters, sample, limit}, corpus{files, lines, lines_malformed,
-lines_oversize, sessions, points_by_event}, sandbox_overhead_ms{p50,p95}, warnings[], hooks[{id, key, event,
+lines_oversize, sessions, points_by_event}, sandbox_overhead_ms{wrapped{p50,p95}, unwrapped{p50,p95}}|null, warnings[], hooks[{id, key, event,
 matcher, command, source, if_ignored, runs, truncated, counts{<outcome>:n}, by_tool{<tool>:counts},
-mechanisms{<mechanism>:n}, flagged_real_ok, latency_ms{n,p50,p95,max}, samples[]}]`.
+mechanisms{<mechanism>:n}, flagged_real_ok, flagged_real_user_prompt, latency_ms{n,p50,p95,max}, samples[]}]`.
 
 **Exit codes.** 0 report produced · 1 internal failure · 2 usage/load error · 3 isolation unavailable without
 `--allow-network` · 4 `--fail-on <outcome,...>` matched at least once · 130 / 143 / 129 stopped by SIGINT / SIGTERM /
@@ -284,12 +301,15 @@ SIGHUP (hooks killed, temp files removed, no report).
 On by default; `--show-raw` disables it and prints a warning line. Applied in `report.js` when a sample or
 any string field is **stored** in the report model, so neither renderer can see raw text. Covers every string
 from a transcript or hook output, file paths, the hook command, object keys inside `tool_input`, and the recorded
-filters. **Everything else printed** goes through the same redactor: the stderr banner (hook command), settings
+filters. Inside `tool_input`, the whole value under a key that names a secret (rule 7's names, a key that is or
+ends in `pass`/`pwd`, `Authorization`, `Cookie`) is replaced by `[REDACTED:value]`, whatever its type; then the
+serialised excerpt is redacted again. Every excerpt is redacted in full before the 300-character cut. **Everything else printed** goes through the same redactor: the stderr banner (hook command), settings
 warnings (absolute paths), usage/load errors, the isolation error, `--dry-run` tool names (an MCP tool name can
 embed anything), and internal errors, which print a one-line redacted message (the stack only with
 `HOOK_REPLAY_DEBUG=1`, also redacted). Order, each replaced by `[REDACTED:<kind>]`:
 
-1. `-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----` → `private_key`
+1. `-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)` → `private_key` (a key
+   without END, cut short by an excerpt or output cap, is redacted to the end of the string)
 2. `sk-ant-[A-Za-z0-9_-]{10,}`, `sk-(proj-)?[A-Za-z0-9_-]{20,}`, Stripe `[sr]k_(live|test)_[A-Za-z0-9]{10,}` → `api_key`
 3. `gh[pousr]_[A-Za-z0-9]{20,}`, `github_pat_[A-Za-z0-9_]{20,}` → `github_token`; GitLab `glpat-[A-Za-z0-9_-]{20,}` →
    `gitlab_token`; npm `npm_[A-Za-z0-9]{36}` → `npm_token`; Hugging Face `hf_[A-Za-z0-9]{30,}` → `hf_token` (these
@@ -297,11 +317,21 @@ embed anything), and internal errors, which print a one-line redacted message (t
 4. `\b(AKIA|ASIA)[A-Z0-9]{16}\b` → `aws_key`; `xox[abprs]-[A-Za-z0-9-]{10,}` → `slack_token`;
    `AIza[0-9A-Za-z_-]{35}` → `google_key`
 5. `eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}` → `jwt`
-6. `(Authorization:\s*|Bearer\s+)\S+` → keep the prefix, `token`
-7. A name matching `[A-Z0-9_-]*(SECRET|TOKEN|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]KEY|PRIVATE[_-]KEY)[A-Z0-9_-]*`
-   (case-insensitive; so also `X-Api-Key`, `Api-Key`, `db_password`), then an optional closing quote (`"api_key":`,
-   or `\"secret\":` inside a JSON string), then `=` or `:`, then a value (`"..."`, `'...'`, `\"...\"` or `\S+`)
-   → keep the name, `value`.
+6. `Authorization:` (also quoted, as a JSON key, and `Proxy-Authorization`) with an optional scheme (`Bearer`,
+   `Basic`, `Token`, `Negotiate`, `NTLM`, `ApiKey`) then `\S+`, or `Bearer\s+\S+` → keep the prefix, `token`.
+   Schemes with comma-separated parameters (`Digest`, `OAuth`, `Hawk`, `AWS4-HMAC-SHA256`, `SCRAM-SHA-*`) are
+   redacted to the end of the line.
+   6a. `Cookie:` / `Set-Cookie:` → the value up to a quote or the end of the line, `cookie`.
+   6b. URL query parameters `token|access_token|refresh_token|id_token|api_key|apikey|key|secret|client_secret|
+   password|passwd|sig|signature=` → the value up to `&`, `#`, whitespace or a quote, `value`.
+   6c. `-u` / `--user` followed by `user:password` (a `digits:digits` uid:gid is left) and `sshpass -p <x>` →
+   `value`.
+7. A name matching `[A-Z0-9_-]*(SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|API[_-]?KEY|ACCESS[_-]KEY|
+   PRIVATE[_-]KEY|ACCOUNT[_-]?KEY|SHARED[_-]?ACCESS[_-]?KEY)[A-Z0-9_-]*` (case-insensitive; so also `X-Api-Key`,
+   `Api-Key`, `db_password`, `PGPASSWORD`, Azure `AccountKey`), or an environment-style name that ends in `_PASS`
+   or `_PWD` (`DB_PASS`, `MYSQL_PWD`; a bare `PWD=` is left), then an optional closing quote (`"api_key":`, or
+   `\"secret\":` inside a JSON string), then `=` or `:`, then a value (`"..."`, `'...'`, `\"...\"` where an inner
+   escaped quote `\\\"` does not end it, or `\S+`) → keep the name, `value`.
    7a. CLI flags with a space before the value: `--[x-]password|passwd|pass|token|secret|api-key|access-key|
    private-key[-x] <value>` (the value may not start with `-`) → `value`. `--password=X` is rule 7.
    7b. mysql/mariadb family only (`mysql`, `mysqldump`, `mariadb-dump`, ...): `-p` directly followed by ≥ 4
@@ -317,7 +347,10 @@ embed anything), and internal errors, which print a one-line redacted message (t
 11. Current username (≥ 3 chars), case-insensitive. 6+ characters: anywhere, also inside identifiers
     (`<user>_backup`, `<USER>_HOME`, `-home-<user>-`). 3–5 characters: only where no letter touches it (`emu_dir`
     and `EMU2` are redacted, `lemur` is not). → `[user]`
-12. Tokens `[A-Za-z0-9+/=_-]{32,}` with Shannon entropy ≥ 4.5 bits/char → `high_entropy` (hex SHAs max 4.0)
+12. Tokens `[A-Za-z0-9+=_-]{32,}` with Shannon entropy ≥ 4.5 bits/char → `high_entropy` (hex SHAs max 4.0).
+    `/` is not part of a token, so a long path is judged per segment and survives. A standard-base64 run with `/`
+    (`[A-Za-z0-9+/]{32,}={0,2}`, an AWS secret key say) is judged whole when it has upper case, lower case and a
+    digit and no segment is a lowercase word of 3+ letters.
 
 Human output then escapes C0/C1 control characters other than `\n`/`\t` as `\xNN` (transcripts can hold terminal
 escapes). Redaction is best-effort pattern matching, and the README says so.
@@ -326,9 +359,9 @@ escapes). Redaction is best-effort pattern matching, and the README says so.
 
 | Threat | Mitigation | Residual |
 |---|---|---|
-| Hook exfiltrates transcript data | bwrap namespaces + seccomp `socket()` → `EACCES` (no TCP/UDP, no filesystem or abstract Unix sockets, no io_uring), verified by a probe that tries to connect out; `SSH_AUTH_SOCK` is scrubbed | a hook can still write what it read into a file (see next row) for a later process to send; with `--allow-network` nothing is isolated; non-Linux and architectures other than aarch64/x86_64 have no isolation at all |
-| Hook side effects × N (writes, deletes, logs) | banner, `--dry-run`, temp cwd, `CLAUDE_HOOK_REPLAY=1`, `--readonly-fs` | without `--readonly-fs` the hook can write anywhere the user can, N times (including files such as `~/.bashrc` or `~/.config/systemd/user/` that something outside the sandbox runs later). Same trust as enabling it, but N× the exposure |
-| Daemonising / fork-bomb hook | pid namespace killed on timeout; process group killed unwrapped; running hooks killed on SIGINT/SIGTERM/SIGHUP | CPU, memory and process count are not limited in v0.1; unwrapped (`--allow-network`) a `setsid` child survives |
+| Hook exfiltrates transcript data | bwrap namespaces + seccomp `socket()` → `EACCES` (no TCP/UDP, no filesystem or abstract Unix sockets, no io_uring), verified by a probe that requires `EACCES` inside and a successful connect unwrapped; `SSH_AUTH_SOCK` is scrubbed; `/run/user/<uid>` hidden | a hook can still write what it read into the temp root (or, with `--writable-fs`, any file) for a later process to send; a FIFO under `$HOME` or anywhere outside `/tmp` and `/run/user/<uid>` stays writable on the read-only mount (the kernel does not apply the read-only check to FIFOs; measured here), so a process outside that reads such a FIFO receives what the hook writes; with `--allow-network` nothing is isolated; non-Linux and architectures other than aarch64/x86_64 have no isolation at all |
+| Hook side effects × N (writes, deletes, logs) | banner, `--dry-run`, temp cwd, `CLAUDE_HOOK_REPLAY=1`, read-only filesystem by default (only the temp root writable), fresh `/dev`, tmpfs on `/tmp` and `/run/user/<uid>` | with `--writable-fs` the hook can write anywhere the user can, N times (including files such as `~/.claude/settings.json`, `~/.bashrc` or `~/.config/systemd/user/` that something outside the sandbox runs later); with `--allow-network` also. Same trust as enabling it, but N× the exposure |
+| Daemonising / fork-bomb hook | pid namespace killed on timeout; process group killed unwrapped; running hooks killed on SIGINT/SIGTERM/SIGHUP | CPU, memory and process count are not limited in v0.1; unwrapped (`--allow-network`, no pid namespace) a `setsid` child leaves the process group and survives the timeout and SIGINT/SIGTERM/SIGHUP of hook-replay |
 | Output bomb | 1 MiB caps | — |
 | Transcript text as terminal escapes | control-char escaping | — |
 | Secrets in report | §8 redaction, 0600 `--out` | pattern misses; raw prefixes sit in 0700 temp during the run and survive SIGKILL of hook-replay |
@@ -375,14 +408,18 @@ the hook's intent, not from our output; replay must equal it. (b) Pipeline fidel
 its stdin and `cat $transcript_path | sha256sum` to a file; payloads must equal hand-written expected payloads
 and the snapshot hash must equal the hash of the expected byte prefix. (c) Direct run, independent of replay:
 each fixture hook is spawned without hook-replay on the hand-written payload from (b) and a prefix the test cuts
-from the fixture bytes at the hand-specified line count; replay's recorded exit code, stdout and outcome must
-equal the direct run. A test-only hook that prints its canonical stdin and the prefix hash is run the same way,
+from the fixture bytes at the hand-specified line count; replay's recorded exit code, timeout and stdout must
+equal the direct run, and replay's outcome must equal the hand-written `expected.json` (no replay code judges the
+direct side). (c) runs sandboxed (default mode) and unwrapped. A test-only hook that prints its canonical stdin and the prefix hash is run the same way,
 so (c) also fails when replay's payload or prefix is wrong (the example hooks do not read `cwd`).
 (d) Redaction: run the full CLI (table and `--json`) on the secrets fixture; none of the planted values, `alice`,
 or `/home/` may appear; with `--show-raw` they must (proves the test can fail). (e) Isolation: a hook that
 connects to a host Unix socket, to `127.0.0.1` and to a non-loopback host address fails under the wrapper with
-`EACCES`, while the same command run directly connects; the probe rejects a wrapper that does not isolate or that
-exits non-zero; the seccomp bytes equal hand-derived programs for aarch64 and x86_64. These tests skip, with a
+`EACCES`, while the same command run directly connects; `io_uring_setup` returns `ENOSYS` inside and not
+outside; the probe rejects a wrapper that does not isolate, that lacks `--seccomp` (also when it hides `/tmp` and
+unshares the network), whose control cannot connect, or that exits non-zero; in the default mode a visible
+directory outside the temp root cannot be written, no host `/dev/pts` can be opened, `/run/user/<uid>` is empty, and
+a host FIFO in a sibling of the temp root is unreachable (each with a `--writable-fs` or unwrapped control); the seccomp bytes equal hand-derived programs for aarch64 and x86_64. These tests skip, with a
 printed reason, only when bwrap is not installed; with bwrap installed and isolation broken they fail. (f) Teardown: a hook that runs `setsid sleep 300 &` then hangs; after timeout
 no such process remains.
 
@@ -425,3 +462,14 @@ Smallest fixes where the text above was self-contradictory or did not work as wr
 5. **§3 `cwd`.** "cwd (envelope)" left `cwd` out of the payload whenever a line lacked it, which no live hook
    would see. Implemented: the line's `cwd`, else the last `cwd` seen in the same file (any line type), else the
    key is omitted and the point carries fidelity `cwd_missing`. Relative `file_path`s resolve against the same value.
+6. **§8 rule 6, again (round 3).** Deviation 1's fix still let `Authorization: Basic <b64>` through (only `Bearer`
+   was consumed). Every scheme is now consumed with its credential (rule 6).
+7. **§7 `sandbox_overhead_ms`.** Was `{p50, p95}` of wrapped minus unwrapped percentiles, which a real run reported
+   inverted (p50 20.67, p95 0.76). It is now `{wrapped{p50,p95}, unwrapped{p50,p95}}`, or null without a wrapper.
+   This changes the meaning of a field, which §7 says bumps the schema id; it stays `hook-replay/report@1` because
+   v0.1 has not been released. **Open: confirm or bump to `@2`.**
+8. **§5 read-only default.** `--readonly-fs` was opt-in; a writable default let a hook plant code that runs later
+   outside the sandbox. Read-only is now the default, `--writable-fs` the opt-out (ADR-0001 updated).
+9. **§1 / §5 relative script paths.** A hook command whose script argument is a relative path that exists from
+   hook-replay's cwd is a usage error (exit 2) asking for an absolute path or `$CLAUDE_PROJECT_DIR/...`: replay
+   runs hooks in a temp cwd, so the hook would fail on every point. The path is not resolved for the user.

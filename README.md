@@ -19,7 +19,7 @@ node bin/hook-replay.js --hook 'node "$CLAUDE_PROJECT_DIR/examples/hooks/deny-rm
   --event PreToolUse --matcher Bash --projects-dir test/fixtures/projects
 ```
 
-Each hook runs in an empty temporary directory, not in your project. A relative script path does not work. Use an absolute path or `$CLAUDE_PROJECT_DIR`. The variable holds the value of `--project-dir`. The default is the current directory.
+Each hook runs in an empty temporary directory, not in your project. A relative script path does not work: if the path exists from your current directory, hook-replay stops with a usage error (exit 2). Use an absolute path or `$CLAUDE_PROJECT_DIR`. The variable holds the value of `--project-dir`. The default is the current directory.
 
 Other ways to run:
 
@@ -43,13 +43,13 @@ h1 PostToolUse Write 1
 Real output for the command above (the four warning lines are cut):
 
 ```text
-hook-replay 0.1.0  points 59  sessions 5  isolation bwrap  cwd temp  redaction on  project-dir ~/dev/hook-replay
+hook-replay 0.1.0  points 59  sessions 5  isolation bwrap (read-only fs)  cwd temp  redaction on  project-dir ~/dev/hook-replay
 
-HOOK  EVENT       MATCHER  RUNS  BLOCK  ASK  WARN  STOP  DEFER  ERROR  TIMEOUT  RTO  P50ms  P95ms  MAXms
-h1    PreToolUse  Bash       23      3    1     0     0      0      0        0    0  110.2  143.9  160.3
-latency measured at concurrency 4; sandbox overhead p50 27.11 ms, p95 42.14 ms
+HOOK  EVENT       MATCHER  RUNS  BLOCK  ASK  WARN  STOP  DEFER  ALLOW  ERROR  TIMEOUT  RTO  P50ms  P95ms  MAXms
+h1    PreToolUse  Bash       23      3    1     0     0      0      2      0        0    0     38   44.7   48.8
+latency measured at concurrency 4; sandbox: `true` took p50 9.56 ms, p95 10.95 ms wrapped; p50 1.35 ms, p95 1.89 ms unwrapped
 
-== h1: node "$[REDACTED:high_entropy].js"
+== h1: node "$CLAUDE_PROJECT_DIR/examples/hooks/deny-rm.js"
 top tools by flagged count: Bash 4
 flagged and the real call succeeded: 3
   [1fb6f8a4d028] block/permission_decision Bash -home-fixture-proj/cccccccc-0000-4000-8000-000000000003.jsonl:6 2026-10-03T08:00:01.000Z exit 0 112.9 ms
@@ -62,7 +62,7 @@ flagged and the real call succeeded: 3
       real session: the real session ran this call and it failed
 ```
 
-The redactor replaced the hook path in the command line. A long path looks like a secret to the redactor (see "Safety and privacy"). The numbers in the table change from run to run. Latency depends on your machine.
+The numbers in the table change from run to run. Latency depends on your machine.
 
 ## How it works
 
@@ -120,9 +120,9 @@ The hooks reference does not publish the full output schema. The check in hook-r
 
 ## Reading the report
 
-The flagged outcomes are `block`, `ask`, `defer`, `warn`, and `stop`. `allow` has its own column in `--json` because it skips the permission prompt.
+The flagged outcomes are `block`, `ask`, `defer`, `warn`, and `stop`. `allow` has its own column (`ALLOW`) because it skips the permission prompt. `by_tool` in `--json` lists only the tools that the hook ran on.
 
-A candidate false positive is a flagged call that the real session ran, and the call succeeded. This is evidence. It is not a verdict. The real call could have been a mistake. You decide. Each sample shows what the real session did: `ran and succeeded`, `ran and failed`, or no result.
+A candidate false positive is a flagged call that the real session ran, and the call succeeded. This is evidence. It is not a verdict. The real call could have been a mistake. You decide. Each sample shows what the real session did: `ran and succeeded`, `ran and failed`, or no result. For a Stop hook, the candidate false positive is a flagged turn after which the real session stopped and waited for the user (`flagged_real_user_prompt` in `--json`).
 
 Samples are chosen by hash of the call and the hook. The same input gives the same samples. Use `--samples <n>` to change the count.
 
@@ -131,7 +131,7 @@ Two cases need care:
 - A PostToolUse `block` is feedback to Claude. The tool already ran. The sample says `effect: feedback to Claude; the tool already ran`.
 - A Stop `additionalContext` keeps Claude working. hook-replay counts it as `block`, not `warn`.
 
-Latency is measured from process start to process end. It includes the wrapper. The report also shows the cost of the wrapper (`sandbox overhead`). Latency depends on `--concurrency`. For clean numbers, use `--concurrency 1`.
+Latency is measured from process start to process end. It includes the wrapper. The report also shows how long `true` takes with and without the wrapper (`sandbox_overhead_ms` in `--json`: `wrapped` and `unwrapped`, each with p50 and p95). Latency depends on `--concurrency`. For clean numbers, use `--concurrency 1`.
 
 Use `--fail-on block,ask` to get exit code 4 when any of these outcomes occurred.
 
@@ -139,9 +139,11 @@ Use `--fail-on block,ask` to get exit code 4 when any of these outcomes occurred
 
 CAUTION: Replay EXECUTES the hook once for each matching call. A hook with side effects repeats them N times. Run `--dry-run` first to see N.
 
-- `--readonly-fs` makes the file system read-only for the hook, except the temporary directory. It needs `bwrap`. You cannot use it with `--allow-network`.
-- Without `--readonly-fs`, the hook can write anywhere that you can write.
-- Redaction is on by default. It is best-effort pattern matching. It can miss a secret. It can also hide text that is not a secret (see the path above). The kinds are: private keys, API keys, GitHub, GitLab, npm, and Hugging Face tokens, AWS keys, Slack tokens, Google keys, JWTs, `Authorization` and `Bearer` values, values of names such as `password` or `api_key`, URL credentials, email addresses, home paths, your user name, and long high-entropy strings.
+- By default, the file system is read-only for the hook, except the temporary directory. The hook gets its own `/dev` (no access to your terminals in `/dev/pts`, its own `/dev/shm`), an empty `/tmp`, and an empty `/run/user/<uid>` (no D-Bus or other session sockets). A hook script under `/tmp` is made visible, read-only.
+- `--writable-fs` lets the hook write anywhere that you can write, N times. This includes files such as `~/.claude/settings.json` or `~/.bashrc` that run later outside the sandbox. hook-replay prints a warning. The hook still gets its own `/dev` and an empty `/run/user/<uid>`.
+- `--readonly-fs` is deprecated. It has no effect, because read-only is the default.
+- The sandbox needs `bwrap`. At start, a probe checks that `socket()` fails with `EACCES` inside the sandbox for a Unix socket and for TCP, and that the same connections succeed without the sandbox. If the probe fails, hook-replay stops with exit code 3.
+- Redaction is on by default. It is best-effort pattern matching. It can miss a secret. It can also hide text that is not a secret (see the path above). The kinds are: private keys (also a key cut short without its END line), API keys, GitHub, GitLab, npm, and Hugging Face tokens, AWS keys, Slack tokens, Google keys, JWTs, `Authorization` values with any scheme (`Bearer`, `Basic`, `Digest`, ...), `Cookie` and `Set-Cookie` values, values of names such as `password`, `api_key`, `DB_PASS`, `MYSQL_PWD`, `AccountKey` or `SharedAccessKey`, the whole value of a JSON key with such a name (also a number or a nested object), `curl -u user:password`, `sshpass -p`, URL credentials and URL parameters such as `token=`, `api_key=` or `sig=`, email addresses, home paths, your user name, and long high-entropy strings. A path is not one high-entropy string: `/` splits it.
 - `--show-raw` turns redaction off. The report then holds raw transcript text.
 - Temporary files have mode 0600 for files and 0700 for directories. hook-replay removes them on exit and on SIGINT, SIGTERM, and SIGHUP.
 - Nothing leaves your machine. hook-replay has no telemetry and no upload.
@@ -149,12 +151,13 @@ CAUTION: Replay EXECUTES the hook once for each matching call. A hook with side 
 
 Residual risks (DESIGN section 9):
 
-- A hook can write data that it read into a file. A process outside the sandbox can send that file later.
+- A hook can write data that it read into the temporary directory, or with `--writable-fs` into any file. A process outside the sandbox can send that file later.
+- The file system is read-only, but a FIFO (named pipe) stays writable on a read-only mount. A hook can write into a FIFO anywhere under your home directory or elsewhere outside `/tmp` and `/run/user/<uid>`, if a process outside the sandbox reads it.
 - With `--allow-network`, there is no isolation. This is also the case on non-Linux systems and on other CPU types.
 - CPU, memory, and process count are not limited.
-- Without the sandbox, a hook child that calls `setsid` can survive a timeout.
+- Without the sandbox (`--allow-network`), there is no pid namespace. hook-replay kills the hook's process group on a timeout and on SIGINT, SIGTERM, and SIGHUP, but a hook child that calls `setsid` leaves the group and survives.
 - If someone sends SIGKILL to hook-replay, the temporary directory stays. It holds raw transcript prefixes.
-- The x86_64 seccomp program was checked against hand-derived bytes only. It has not run on an x86_64 kernel.
+- The x86_64 seccomp program was checked against hand-derived bytes only. It has not run on an x86_64 kernel. On the aarch64 test machine, the x32 and wrong-architecture rules are also checked by bytes only. The `socket()` and `io_uring_setup()` rules are checked by behaviour.
 
 ## Fidelity limits
 
@@ -166,7 +169,7 @@ A replay does not give the same result as a live session. Know these limits (DES
 4. Not reproduced: the `if` field (use `--ignore-if` to run those hooks anyway), parallel hooks, and the limit on Stop continuations.
 5. Absent fields: `prompt_id`, `effort`, `mcp_server`, `duration_ms`, `agent_type`, `scratchpad_dir`.
 6. A hook that looks for files next to the transcript does not find them.
-7. The environment, the temporary working directory, and the missing sockets differ from a live session. `--cwd recorded` uses the recorded directory when it exists.
+7. The environment, the temporary working directory, the missing sockets, and the read-only file system differ from a live session. `--cwd recorded` uses the recorded directory when it exists.
 8. A stateful hook sees thousands of calls in minutes.
 9. v0.1 handles only `command` hooks for PreToolUse, PostToolUse, and Stop. It skips `async` hooks and shows each skip as a warning.
 10. Windows and macOS isolation are not available.

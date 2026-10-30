@@ -122,10 +122,12 @@ This cannot generalise across languages, and it says nothing about latency.
   later calls, and text the hook would have injected is absent.
 
 **Risks accepted.**
-- Without `--readonly-fs`, a hook can write anywhere the user can, N times. We mitigate this with a banner,
+- With `--writable-fs` (amended: read-only is the default, see the second amendment), a hook can write anywhere
+  the user can, N times. We mitigate this with a banner,
   `--dry-run`, a temp cwd by default (this overrides the owner's "recorded cwd" default, which is still
   available as `--cwd recorded`) and `CLAUDE_HOOK_REPLAY=1`. We do not eliminate it.
-- A hook can write what it reads into a file (without `--readonly-fs`, anywhere the user can) for a process
+- A hook can write what it reads into a file (the temp root; with `--writable-fs`, anywhere the user can; and a
+  FIFO anywhere outside `/tmp` and `/run/user/<uid>`, which stays writable on a read-only mount) for a process
   outside the sandbox to send later. CPU, memory and process count are not limited.
 - Raw transcript prefixes sit in a 0700 temp dir during the run, and survive if hook-replay is SIGKILLed.
 
@@ -169,3 +171,23 @@ plain, 27.0 ms wrapped. Machines without bwrap now always need `--allow-network`
 
 **Not verified.** The x86_64 program has been checked only against hand-derived bytes, not run on an x86_64
 kernel. macOS has no isolation.
+
+## Amendment (round-3 review, 2026-10-30): read-only filesystem by default, stricter probe
+
+**What was wrong.** The default wrapper was `--dev-bind / /`, so a hook could write anything the user can: rewrite
+`~/.claude/settings.json` (or `~/.bashrc`, `~/.config/systemd/user/`) and so get code run later outside the
+sandbox, open the user's other terminals under `/dev/pts`, and write host FIFOs and `/dev/shm`. `--readonly-fs`
+existed but was opt-in. Separately, the probe accepted any connect error: a wrapper without seccomp that hid
+`/tmp` (`ENOENT`) and unshared the network (`ECONNREFUSED`) passed, and then reached `/run/user/<uid>/bus`.
+
+**Decision.** Read-only is the default: `--ro-bind / /`, `--dev /dev`, `--proc /proc`, a tmpfs on `/tmp` and on
+`/run/user/<uid>`, the temp root bound read-write, hook scripts under a hidden dir bound read-only. `--writable-fs`
+is the opt-out (warning on stderr and in the report; still a fresh `/dev` and a hidden `/run/user/<uid>`);
+`--readonly-fs` is a deprecated no-op. The probe's Unix listener lives in the temp root, which every mode binds in,
+every connect must fail with `EACCES`, and the same client run unwrapped must connect (positive control).
+
+**Cost.** Hooks that write outside the temp root (caches under `$HOME`, logs) now fail by default and show as
+`error`; the user can pass `--writable-fs`.
+
+**Residual.** A FIFO stays writable on a read-only mount (the kernel's read-only check covers regular files,
+directories and links only; measured here with bwrap). FIFOs under `$HOME` and other visible paths are reachable.
