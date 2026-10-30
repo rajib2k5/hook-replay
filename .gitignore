@@ -1,0 +1,5 @@
+node_modules/
+*.log
+.hook-replay-*/
+report*.json
+.DS_Store
