@@ -417,7 +417,8 @@ embed anything), and internal errors, which print a one-line redacted message (t
    `PASSWORD=1234` and `api_key: 1234` go.
    7a. CLI flags with a space or `=` before the value: `--[x-]password|passwd|pass|pw|token|secret|api-key|access-key|
    private-key[-x] <value>` or `...=<value>` (the value may not start with `-`; a bare value ends before a closing
-   quote, as in rule 7) → `value`; a flag ending in `-stdin`, `-file`,
+   quote, as in rule 7, and before any `\"`) → `value`; inside a JSON string `--pw=\"x y\"` (or `\\\"x y\\\"` one
+   level deeper) is one value and keeps its escaped quotes: `--pw=\"[REDACTED:value]\"`; a flag ending in `-stdin`, `-file`,
    `-env`, `-cmd`, `-command` or `-prompt` takes no secret and is left. `--password=X` is already rule 7 and is not redacted twice.
    7b. mysql/mariadb family only (`mysql`, `mysqldump`, `mariadb-dump`, ...): `-p` directly followed by ≥ 4
    non-space characters later in the same command → `-p[REDACTED:value]`. Other commands' `-p` (often a port)

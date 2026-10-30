@@ -306,3 +306,21 @@ const keeps6b = [
   String.raw`"{\"u\":\"file:12:5:https://x\"}"`,
 ];
 for (const input of keeps6b) test(`round 6b keep: ${JSON.stringify(input)}`, () => assert.equal(R(input), input));
+
+// Round-6 re-review: inside a JSON string --pw="x" is written --pw=\"x\". The value was read as a bare word, so
+// --pw=\"abc def\" left def, --pw=\"x\" lost its opening \", and --pw=Wd93\"x\" took \"x with the value. The escaped
+// quoted form is now one value whose escapes stay, and a bare value ends before \".
+const exact6c = [
+  ['--pw=\\"x y\\" in a JSON string', String.raw`{"c":"t --pw=\"abc defWd94\" x"}`, String.raw`{"c":"t --pw=\"[REDACTED:value]\" x"}`],
+  ['--pw=\\"x\\" keeps both \\"', String.raw`{"c":"t --pw=\"xWd92\" y"}`, String.raw`{"c":"t --pw=\"[REDACTED:value]\" y"}`],
+  ['--pw \\"x\\" (space)', String.raw`{"c":"t --pw \"xWd91\" y"}`, String.raw`{"c":"t --pw \"[REDACTED:value]\" y"}`],
+  ['--pw=x\\"y\\" keeps \\"y\\"', String.raw`{"c":"t --pw=Wd93\"x\" y"}`, String.raw`{"c":"t --pw=[REDACTED:value]\"x\" y"}`],
+  ['--pw=\\\\\\"x y\\\\\\" one level deeper', String.raw`"{\"c\":\"t --pw=\\\"abc defWd90\\\" x\"}"`,
+    String.raw`"{\"c\":\"t --pw=\\\"[REDACTED:value]\\\" x\"}"`],
+];
+for (const [name, input, want] of exact6c) test(`round 6c exact: ${name}`, () => assert.equal(R(input), want));
+
+test('round 6c leak: --pw=\\" with no closing \\" (a cut excerpt) still loses its value', () => {
+  const out = R(String.raw`{"c":"t --pw=\"Wd89cut`);
+  assert.ok(!out.includes('Wd89cut'), out);
+});

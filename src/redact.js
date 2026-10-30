@@ -17,7 +17,8 @@ const NAMES = String.raw`SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|AP
 const KEY_NAME = String.raw`\b([A-Z0-9_-]*(${NAMES})[A-Z0-9_-]*)(\\?["']?)`;
 // A bare word: non-space characters up to whitespace, except a closing quote (also \" or \') that ends the word, i.e.
 // is followed by whitespace, an escaped \n, , ; ) ] } or the end: "X-Api-Key: v" keeps its quote (round-5 review).
-const WORD = String.raw`(?:(?!\\?["'](?:[\s,;)\]}]|\\[nrt]|$))\S)+`;
+const WORD_CHAR = String.raw`(?!\\?["'](?:[\s,;)\]}]|\\[nrt]|$))\S`;
+const WORD = String.raw`(?:${WORD_CHAR})+`;
 // A value: a number or boolean (kept by keepScalar unless the name ends in a secret word), a JSON string inside a
 // JSON string (\"...\", where an inner quote is \\\" and an inner backslash \\\\), a JSON string, a single-quoted
 // string, a flat [...] array or {...} object (every element goes, also inside a string), or a WORD that is not an
@@ -122,8 +123,11 @@ const RULES = [
   // Upper-case environment names that are or end in _KEY (OPENAI_KEY=, KEY=); lower case (sort_key=) is left.
   [new RegExp(String.raw`\b(${ENV_KEY})(\\?["']?)\s*[=:]\s*${VALUE}`, 'g'), (m, name, _q, value) => keepOr(m, name, value)],
   // CLI flags, the value after a space or '=' (--pw=X; --password=X is already a key=value above, and a value that is
-  // an earlier rule's marker is left). The value may not look like a flag; a bare one ends before a closing quote.
-  [new RegExp(String.raw`(${SECRET_FLAG})(\s+|=)(?!\[REDACTED:)("[^"]*"|'[^']*'|(?!-)${WORD})`, 'gi'), `$1$2${R('value')}`],
+  // an earlier rule's marker is left). The value may not look like a flag; a bare one ends before a closing quote and
+  // before an escaped quote. Inside a JSON string --pw="x y" is --pw=\"x y\" (\\\" one level deeper): one value, and
+  // the escaped quotes around it stay. An opening \" with no closing one (a cut excerpt) goes with the value.
+  [new RegExp(String.raw`(${SECRET_FLAG})(\s+|=)(?!\[REDACTED:)(?:(?<bs>\\+)"(?:(?!\k<bs>")[^\n])*\k<bs>"|(?:"[^"]*"|'[^']*'|(?!-)(?:\\")?(?:(?!\\")${WORD_CHAR})+))`, 'gi'),
+    (m, flag, sep, ...rest) => { const { bs } = rest.at(-1); return flag + sep + (bs ? `${bs}"${R('value')}${bs}"` : R('value')); }],
   // mysql/mariadb family only: -p directly followed by >= 4 non-space characters is the password.
   [/(\b(?:mysql|mariadb)[\w-]*\s(?:[^\n|;&]*?\s)?)-p(\S{4,})/g, `$1-p${R('value')}`],
   // Hex (>= 32) is redacted only after a key-like name or an X- header: bare git SHAs must survive.
