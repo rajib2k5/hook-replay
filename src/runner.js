@@ -6,8 +6,12 @@ export const OUTPUT_CAP = 1024 * 1024;
 const PIPE_GRACE_MS = 100;
 const ENV_ALLOW = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ'];
 
-export function commandArgv(hook) {
-  return Array.isArray(hook.args) ? [hook.command, ...hook.args] : ['sh', '-c', hook.command];
+// Exec form (args set): the CLAUDE_* placeholders are substituted textually; shell form leaves expansion to sh.
+export function commandArgv(hook, vars = {}) {
+  if (!Array.isArray(hook.args)) return ['sh', '-c', hook.command];
+  const sub = (s) => s.replace(/\$\{(CLAUDE_PROJECT_DIR|CLAUDE_PLUGIN_ROOT|CLAUDE_PLUGIN_DATA)\}|\$(CLAUDE_PROJECT_DIR|CLAUDE_PLUGIN_ROOT|CLAUDE_PLUGIN_DATA)\b/g,
+    (m, a, b) => vars[a || b] ?? m);
+  return [sub(hook.command), ...hook.args.map(sub)];
 }
 
 export function buildEnv({ source = process.env, tmp, projectDir, pluginRoot, envNames = [] }) {

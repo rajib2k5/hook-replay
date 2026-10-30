@@ -4,11 +4,12 @@ import path from 'node:path';
 import { parseArgs } from 'node:util';
 import { discover } from './corpus.js';
 import { scan } from './scan.js';
-import { hookFromFlags, UsageError } from './hooks.js';
+import { hookFromFlags, loadSettings, checkPluginRoot, UsageError } from './hooks.js';
+import { parseFilters, keepFile } from './filters.js';
 import { DEFAULT_MAX_LINE_BYTES } from './lines.js';
 import fs from 'node:fs';
 import { replay, IsolationError, DEFAULT_TIMEOUT_S } from './replay.js';
-import { buildReport, renderHuman, renderJson } from './report.js';
+import { buildReport, renderHuman, renderJson, OUTCOMES } from './report.js';
 import { makeRedactor } from './redact.js';
 
 export const VERSION = '0.1.0';
@@ -69,7 +70,23 @@ export function parseCli(argv) {
   if (!Number.isInteger(opts.samples) || opts.samples < 0) throw new UsageError('--samples must be a non-negative integer');
   if (!(opts.timeoutS > 0)) throw new UsageError('--timeout must be a positive number of seconds');
   if (!['temp', 'recorded'].includes(opts.cwdMode)) throw new UsageError('--cwd must be temp or recorded');
-  opts.hooks = [hookFromFlags({ hook: v.hook, event: v.event, matcher: v.matcher, hookTimeout: v['hook-timeout'], onFailure: v['on-failure'] })];
+  opts.filters = parseFilters({ project: v.project, session: v.session, since: v.since, until: v.until, sample: v.sample });
+  opts.failOn = [];
+  if (v['fail-on'] !== undefined) {
+    opts.failOn = v['fail-on'].split(',').map(x => x.trim()).filter(Boolean);
+    const bad = opts.failOn.filter(o => !OUTCOMES.includes(o));
+    if (bad.length || !opts.failOn.length) throw new UsageError(`--fail-on takes outcomes from ${OUTCOMES.join(',')}; got ${v['fail-on']}`);
+  }
+  opts.loadWarnings = [];
+  if (v.settings) {
+    const { hooks, warnings } = loadSettings(path.resolve(v.settings), { ignoreIf: !!v['ignore-if'], pluginRoot: opts.pluginRoot });
+    opts.hooks = hooks;
+    opts.loadWarnings = warnings;
+  } else {
+    const h = hookFromFlags({ hook: v.hook, event: v.event, matcher: v.matcher, hookTimeout: v['hook-timeout'], onFailure: v['on-failure'] });
+    checkPluginRoot(h, opts.pluginRoot);
+    opts.hooks = [h];
+  }
   return opts;
 }
 
@@ -83,9 +100,10 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
   }
   if (opts.help) { io.stdout.write(USAGE + '\n'); return 0; }
   if (opts.version) { io.stdout.write(VERSION + '\n'); return 0; }
-  const files = discover(opts.projectsDir);
-  const s = await scan({ files, hooks: opts.hooks, includeSubagents: opts.includeSubagents, maxLineBytes: opts.maxLineBytes, limit: opts.limit });
+  for (const w of opts.loadWarnings) io.stderr.write(`hook-replay: warning: ${w}\n`);
   if (opts.dryRun) {
+    const files = discover(opts.projectsDir).filter(f => keepFile(f, opts.filters));
+    const s = await scan({ files, hooks: opts.hooks, filters: opts.filters, includeSubagents: opts.includeSubagents, maxLineBytes: opts.maxLineBytes, limit: opts.limit });
     io.stderr.write(`hook-replay ${VERSION}: dry run, nothing executed\n`);
     const hooks = opts.hooks.map(h => ({ id: h.id, event: h.event, matcher: h.matcher ?? null, ...s.perHook[h.id] }));
     if (opts.json) io.stdout.write(JSON.stringify({ dry_run: true, corpus: s.corpus, hooks }, null, 2) + '\n');
@@ -104,14 +122,15 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
     if (e instanceof IsolationError) { io.stderr.write(`hook-replay: ${e.message}\n`); return 3; }
     throw e;
   }
-  const warnings = [];
+  const warnings = [...opts.loadWarnings];
+  if (opts.hooks.some(h => h.ifIgnored)) warnings.push('--ignore-if: hooks with an if field ran on every matcher hit, so their counts are an upper bound');
   if (opts.showRaw) warnings.push('redaction OFF (--show-raw): this report contains raw transcript text');
   if (res.isolation.network === 'NOT ISOLATED') warnings.push('network NOT ISOLATED (--allow-network): hooks could reach the network');
   const model = buildReport({
     res, hooks: opts.hooks, samples: opts.samples, warnings, version: VERSION, redacted: !opts.showRaw,
     redact: makeRedactor({ enabled: !opts.showRaw }),
     config: { timeout_s: opts.timeoutS, concurrency: opts.concurrency, cwd_mode: opts.cwdMode, project_dir: opts.projectDir,
-      filters: {}, sample: null, limit: opts.limit },
+      filters: opts.filters.raw, sample: opts.filters.sample, limit: opts.limit },
   });
   const text = opts.json || opts.out ? renderJson(model) : renderHuman(model);
   if (opts.out) {
@@ -119,5 +138,6 @@ export async function main(argv, io = { stdout: process.stdout, stderr: process.
     fs.chmodSync(opts.out, 0o600);
     if (!opts.json) io.stdout.write(renderHuman(model));
   } else io.stdout.write(text);
+  if (opts.failOn.some(o => model.hooks.some(h => h.counts[o] > 0))) return 4;
   return 0;
 }

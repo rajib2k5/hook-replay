@@ -1,5 +1,6 @@
 // HookSpec construction: from --hook flags (shell form) or from a settings.json / plugin hooks.json.
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { validateMatcher } from './matcher.js';
 
 export const EVENTS = ['PreToolUse', 'PostToolUse', 'Stop'];
@@ -26,3 +27,53 @@ export function hookFromFlags({ hook, event, matcher, hookTimeout, onFailure }) 
 }
 
 export { hookKey };
+
+const PLUGIN_ROOT_RE = /\$\{?CLAUDE_PLUGIN_ROOT\b/;
+
+export function checkPluginRoot(h, pluginRoot) {
+  const text = [h.command, ...(h.args || [])].join(' ');
+  if (pluginRoot === undefined && PLUGIN_ROOT_RE.test(text)) {
+    throw new UsageError(`hook ${h.id} (${h.source}) references CLAUDE_PLUGIN_ROOT; pass --plugin-root`);
+  }
+}
+
+// Reads .hooks.{PreToolUse,PostToolUse,Stop}[] of a settings.json or plugin hooks.json. Returns {hooks, warnings}.
+export function loadSettings(file, { ignoreIf = false, pluginRoot } = {}) {
+  let doc;
+  try { doc = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new UsageError(`cannot load ${file}: ${e.message}`); }
+  const all = doc && typeof doc === 'object' && doc.hooks && typeof doc.hooks === 'object' ? doc.hooks : {};
+  const hooks = [];
+  const warnings = [];
+  for (const event of Object.keys(all)) {
+    if (!EVENTS.includes(event)) { warnings.push(`skipped ${event} hooks in ${file}: event not supported in v0.1`); }
+  }
+  for (const event of EVENTS) {
+    const groups = Array.isArray(all[event]) ? all[event] : [];
+    groups.forEach((g, gi) => {
+      const matcher = event === 'Stop' ? undefined : (g.matcher === undefined || g.matcher === null ? undefined : String(g.matcher));
+      if (matcher !== undefined) {
+        try { validateMatcher(matcher); } catch (e) { throw new UsageError(`${file}#hooks.${event}[${gi}]: ${e.message}`); }
+      }
+      (Array.isArray(g.hooks) ? g.hooks : []).forEach((x, hi) => {
+        const source = `${file}#hooks.${event}[${gi}].hooks[${hi}]`;
+        const skip = (why) => warnings.push(`skipped ${source}: ${why}`);
+        if (!x || x.type !== 'command') return skip(`type ${JSON.stringify(x && x.type)} is not command`);
+        if (x.async || x.asyncRewake) return skip('async hooks are not replayed');
+        if (x.shell === 'powershell') return skip('shell powershell is not supported');
+        if (typeof x.command !== 'string' || x.command === '') return skip('no command');
+        const args = Array.isArray(x.args) ? x.args.map(String) : undefined;
+        if ([x.command, ...(args || [])].some(s => s.includes('${user_config.'))) return skip('references ${user_config.*}');
+        if (x.if !== undefined && !ignoreIf) throw new UsageError(`${source} has an "if" field, which replay cannot evaluate; pass --ignore-if to run it on every matcher hit`);
+        const timeoutS = x.timeout === undefined ? DEFAULT_HOOK_TIMEOUT_S : Number(x.timeout);
+        if (!(timeoutS > 0)) throw new UsageError(`${source}: timeout must be a positive number`);
+        const onFailure = x.onFailure ?? 'continue';
+        if (!['continue', 'block'].includes(onFailure)) throw new UsageError(`${source}: onFailure must be continue or block`);
+        const h = { id: `h${hooks.length + 1}`, event, matcher, command: x.command, args, timeoutS, onFailure, source, ifIgnored: x.if !== undefined };
+        h.key = hookKey(h);
+        checkPluginRoot(h, pluginRoot);
+        hooks.push(h);
+      });
+    });
+  }
+  return { hooks, warnings };
+}
