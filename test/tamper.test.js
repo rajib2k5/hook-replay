@@ -59,3 +59,48 @@ for (const concurrency of ['1', '4']) {
     });
   }
 }
+
+// Round-5 review (ren.sh, snapln.sh): with --writable-fs the hook renamed the temp root (or, unwrapped, the snap dir)
+// and put a link to another directory at the old path. O_NOFOLLOW covers only the last component, so hook-replay
+// created the next snapshot inside the link's target, and the raw prefix in the renamed root stayed after exit.
+// Each run the hook records what it sees in the target (<target>.seen), since a snapshot there is unlinked at close.
+const RENAME = `const fs=require('fs'),path=require('path');let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{
+const tp=JSON.parse(d).transcript_path,[mode,target]=process.argv.slice(2),D=path.dirname(tp),R=path.dirname(D);
+const seen=fs.readdirSync(target);if(seen.length)fs.appendFileSync(target+'.seen',seen.join('\\n')+'\\n');
+try{if(mode==='root'&&!fs.existsSync(R+'.old')){fs.renameSync(R,R+'.old');fs.mkdirSync(R);fs.symlinkSync(target,path.join(R,'snap'));
+for(const w of ['cwd','tmp','plugin-data'])fs.mkdirSync(path.join(R,'work',w),{recursive:true});console.log('renamed')}
+if(mode==='snap'&&!fs.lstatSync(D).isSymbolicLink()){fs.renameSync(D,D+'.old');fs.symlinkSync(target,D);console.log('renamed')}}
+catch(e){console.log('error '+e.code)}})`;
+
+// Every regular file under dir whose name looks like a snapshot (t-<n>[-<rand>].jsonl), at any depth.
+const snapshotsUnder = (dir) => fs.readdirSync(dir, { recursive: true, withFileTypes: true })
+  .filter(e => e.isFile() && /^t-\d+/.test(e.name)).map(e => path.join(e.parentPath, e.name));
+
+for (const [mode, what, extra, skip] of [
+  ['--writable-fs', 'root', ['--writable-fs'], noBwrap],
+  ['--allow-network (unwrapped)', 'root', ['--allow-network'], false],
+  ['--allow-network (unwrapped)', 'snap', ['--allow-network'], false],
+]) {
+  test(`${mode}: a hook that renames the ${what} dir and links the old path elsewhere does not redirect snapshot creates`, { skip }, (t) => {
+    const d = tmpDir(t);
+    const [target, tmpdir] = [path.join(d, 'target'), path.join(d, 'tmpdir')];
+    fs.mkdirSync(target);
+    fs.mkdirSync(tmpdir);
+    const script = path.join(d, 'rename.cjs');
+    fs.writeFileSync(script, RENAME);
+    const r = spawnSync(process.execPath, [path.join(root, 'bin/hook-replay.js'), '--projects-dir', projects, '--hook', `node ${script} ${what} ${target}`,
+      '--event', 'PreToolUse', '--json', '--concurrency', '1', ...extra], { encoding: 'utf8', cwd: root, env: { ...process.env, TMPDIR: tmpdir } });
+    assert.deepEqual(fs.readdirSync(target), [], 'hook-replay created a snapshot in the link target');
+    assert.equal(fs.existsSync(`${target}.seen`) && fs.readFileSync(`${target}.seen`, 'utf8'), false, 'a hook run saw a snapshot in the link target');
+    assert.deepEqual(snapshotsUnder(tmpdir), [], 'a raw transcript prefix stayed after exit');
+    assert.deepEqual(fs.readdirSync(tmpdir).filter(n => n.endsWith('.old')), [], 'the renamed root stayed after exit');
+    if (extra[0] === '--writable-fs') {
+      assert.equal(r.status, 0, r.stderr);
+      assert.ok(JSON.parse(r.stdout).hooks[0].runs > 5);
+    } else {
+      assert.equal(r.status, 1, r.stdout + r.stderr);
+      assert.match(r.stderr, /hook-replay: .*no longer the snapshot directory/);
+      assert.doesNotMatch(r.stderr, /internal error/);
+    }
+  });
+}

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { discover } from './corpus.js';
 import { scan, filePoints, toolOf } from './scan.js';
-import { Snapshot } from './snapshot.js';
+import { Snapshot, SnapDir, SnapDirError } from './snapshot.js';
 import { SourceError } from './lines.js';
 import { runHook, buildEnv, commandArgv, killRunning } from './runner.js';
 import { classify } from './classify.js';
@@ -13,7 +13,7 @@ import { keepFile } from './filters.js';
 import { makeRedactor, escapeControl } from './redact.js';
 import { chooseIsolation, wrapperArgv, hookBinds, hiddenDirs, measureOverhead, IsolationError } from './sandbox.js';
 
-export { IsolationError };
+export { IsolationError, SnapDirError };
 
 export const DEFAULT_TIMEOUT_S = 10;
 const SIGNAL_EXIT = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
@@ -60,11 +60,33 @@ export async function replay(opts) {
   const s = await scan({ files, hooks, filters, includeSubagents, maxLineBytes, homedir, limit });
   const dirs = makeRoot();
   const { root: tmp, snap: snapDir, work } = dirs;
-  // Kill what still runs before removing the root: a live hook can recreate files in it. rmSync does not follow
-  // symlinks (it unlinks them), so a link a hook left in work/ cannot make it empty the link's target.
+  // Both opened once (round-5 review, ren.sh): snapshots are created and removed through snaps (snapshot.js SnapDir),
+  // and teardown removes the root by path only while the path still names the root made here.
+  const snaps = new SnapDir(snapDir);
+  const rootDir = new SnapDir(tmp);
+  const live = new Set();
+  // Kill what still runs before removing anything: a live hook can recreate files. Then unlink the snapshots still
+  // open, through the snap dir fd. rmSync does not follow symlinks (it unlinks them), so a link a hook left in work/
+  // cannot make it empty the link's target. If a hook (unwrapped, or an ancestor of the root under --writable-fs)
+  // renamed the root, the path is not removed (it may be the hook's); snap/ and work/ are removed through the root fd,
+  // then the root under the name it has now, if empty.
+  let cleaned = false;
   const cleanup = () => {
     killRunning();
-    try { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ }
+    if (cleaned) return;
+    cleaned = true;
+    for (const sn of live) sn.close();
+    const rm = (p) => { try { fs.rmSync(p, { recursive: true, force: true, maxRetries: 3 }); } catch { /* best effort */ } };
+    try { rootDir.verify(); rm(tmp); } catch {
+      for (const d of ['snap', 'work']) rm(rootDir.at(d));
+      try {
+        const now = fs.readlinkSync(rootDir.via);
+        const st = fs.lstatSync(now, { bigint: true });
+        if (st.dev === rootDir.id.dev && st.ino === rootDir.id.ino) fs.rmdirSync(now);
+      } catch { /* best effort */ }
+    }
+    snaps.close();
+    rootDir.close();
   };
   // Installed before the probe, which already spawns sandboxes. On a signal: kill, remove, exit 128+N.
   const handlers = Object.entries(SIGNAL_EXIT).map(([sig, code]) => [sig, () => {
@@ -81,8 +103,8 @@ export async function replay(opts) {
   let isolation;
   let sandboxOverheadMs;
   try {
-    isolation = await chooseIsolation({ allowNetwork, writableFs, work, snap: snapDir, binary: bwrapBinary });
-    sandboxOverheadMs = await measureOverhead(isolation, { work, snap: snapDir });
+    isolation = await chooseIsolation({ allowNetwork, writableFs, root: tmp, work, snap: snapDir, binary: bwrapBinary });
+    sandboxOverheadMs = await measureOverhead(isolation, { root: tmp, work, snap: snapDir });
   } catch (e) {
     unhook();
     cleanup();
@@ -107,11 +129,12 @@ export async function replay(opts) {
       // A source that is no longer a readable regular file (a hook replaced it, a FIFO say) is counted and skipped:
       // both opens below fail before any point of it runs.
       let snap;
-      try { snap = new Snapshot(f.path, snapDir, `t-${n}`, { onTamper }); } catch (e) {
+      try { snap = new Snapshot(f.path, snaps, `t-${n}`, { onTamper }); } catch (e) {
         if (!(e instanceof SourceError)) throw e;
         s.corpus.files_unreadable++;
         return;
       }
+      live.add(snap);
       try {
         for await (const p of filePoints(f, { includeSubagents, maxLineBytes, homedir })) {
           const ids = sel.get(p.key);
@@ -127,7 +150,7 @@ export async function replay(opts) {
               try { if (fs.statSync(p.payload.cwd).isDirectory()) cwd = p.payload.cwd; } catch { /* keep temp cwd */ }
             }
             const cmd = commandArgv(hook, env);
-            const argv = wrapperArgv(isolation.wrapper, cmd, { writableFs: !isolation.readonly_fs, work, snap: snapDir, binary: isolation.binary,
+            const argv = wrapperArgv(isolation.wrapper, cmd, { writableFs: !isolation.readonly_fs, root: tmp, work, snap: snapDir, binary: isolation.binary,
               binds: hookBinds(cmd, hidden) });
             const run = await runHook({ argv, stdin, env, cwd, timeoutMs: t.seconds * 1000, timeoutSource: t.source,
               killGroup: true, extraInput: isolation.filter ? [isolation.filter] : [] });
@@ -143,6 +166,7 @@ export async function replay(opts) {
         s.corpus.files_unreadable++;
       } finally {
         snap.close();
+        live.delete(snap);
       }
     });
   } finally {

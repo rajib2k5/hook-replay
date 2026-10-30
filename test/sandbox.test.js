@@ -104,6 +104,10 @@ test('wrapperArgv: read-only root by default, --writable-fs binds / writable; bo
       '--bind', '/t/work', '/t/work', ...snap, ...ns, 'true']);
   assert.deepEqual(wrapperArgv('bwrap', ['sh', '-c', 'x'], { writableFs: true, work: '/t/work', snap: '/t/snap', runUser: '/run/user/1000' }),
     ['bwrap', '--bind', '/', '/', '--dev', '/dev', '--proc', '/proc', ...run, '--bind', '/t/work', '/t/work', ...snap, ...ns, 'sh', '-c', 'x']);
+  // --writable-fs binds the temp root read-only onto itself, before work/ and snap/, so it cannot be renamed.
+  assert.deepEqual(wrapperArgv('bwrap', ['true'], { writableFs: true, root: '/t', work: '/t/work', snap: '/t/snap', runUser: null }),
+    ['bwrap', '--bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--ro-bind', '/t', '/t', '--bind', '/t/work', '/t/work', ...snap, ...ns, 'true']);
+  assert.equal(wrapperArgv('bwrap', ['true'], { root: '/t', work: '/t/work', runUser: null }).includes('/t'), false, 'read-only mode: / is read-only already');
   assert.deepEqual(wrapperArgv('bwrap', ['true'], { work: '/t/x', runUser: null }),
     ['bwrap', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--bind', '/t/x', '/t/x', ...ns, 'true']);
   assert.deepEqual(wrapperArgv(null, ['true'], {}), ['true']);

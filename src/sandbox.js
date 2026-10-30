@@ -32,12 +32,15 @@ export function runUserDir(uid = process.getuid?.()) {
 // the sandbox to run later. `snap` (<root>/snap, the transcript snapshots) is bound read-only at the same path in
 // every mode, last, so transcript_path resolves and the hook cannot create, replace or link entries there: the
 // files hook-replay itself opens outside the sandbox. --writable-fs binds the root writable but keeps the fresh
-// /dev, the hidden /run/user/<uid> and the read-only `snap`.
-export function wrapperArgv(kind, argv, { writableFs = false, work, snap, binary, binds = [], runUser = runUserDir() } = {}) {
+// /dev, the hidden /run/user/<uid> and the read-only `snap`, and binds `root` (the temp root) read-only onto itself
+// before `work` and `snap`: a mount point cannot be renamed (EBUSY), so the hook cannot move the root away and put a
+// link at its path (round-5 review, ren.sh). An ancestor of the root can still be renamed: see snapshot.js SnapDir.
+export function wrapperArgv(kind, argv, { writableFs = false, root, work, snap, binary, binds = [], runUser = runUserDir() } = {}) {
   if (kind !== 'bwrap') return argv;
   const fsArgs = [...(writableFs ? ['--bind', '/', '/'] : ['--ro-bind', '/', '/']), '--dev', '/dev', '--proc', '/proc',
     ...(writableFs ? [] : ['--tmpfs', '/tmp']), ...(runUser ? ['--tmpfs', runUser] : []),
-    ...binds.flatMap(b => ['--ro-bind', b, b]), '--bind', work, work, ...(snap ? ['--ro-bind', snap, snap] : [])];
+    ...binds.flatMap(b => ['--ro-bind', b, b]), ...(writableFs && root ? ['--ro-bind', root, root] : []),
+    '--bind', work, work, ...(snap ? ['--ro-bind', snap, snap] : [])];
   return [binary ?? 'bwrap', ...fsArgs, '--unshare-all', '--new-session', '--die-with-parent', '--seccomp', String(SECCOMP_FD), '--', ...argv];
 }
 
@@ -112,8 +115,8 @@ const ownNs = (k) => { try { return fs.readlinkSync(`/proc/self/ns/${k}`); } cat
 // same client run unwrapped must connect to every target it has a listener for (::1 has none when the host has no
 // IPv6 loopback; inside it must still be EACCES). `wrap` builds the wrapped argv, `control` the unwrapped one,
 // `python` the python3 path or null (tests inject them).
-export async function probe({ work, snap, writableFs = false, binary, filter = seccompFilter(), wrap, control = (argv) => argv, python = which('python3') } = {}) {
-  const w = wrap ?? ((argv) => wrapperArgv('bwrap', argv, { writableFs, work, snap, binary }));
+export async function probe({ root, work, snap, writableFs = false, binary, filter = seccompFilter(), wrap, control = (argv) => argv, python = which('python3') } = {}) {
+  const w = wrap ?? ((argv) => wrapperArgv('bwrap', argv, { writableFs, root, work, snap, binary }));
   const extraInput = filter ? [filter] : [];
   const run = (argv, input = extraInput) => runHook({ argv, stdin: '', env: { PATH: process.env.PATH }, cwd: work, timeoutMs: 10000,
     timeoutSource: 'replay_cap', extraInput: input });
@@ -183,14 +186,14 @@ function which(cmd) {
   return cmd;
 }
 
-export async function chooseIsolation({ allowNetwork = false, writableFs = false, work, snap, binary = 'bwrap', arch = process.arch, platform = process.platform }) {
+export async function chooseIsolation({ allowNetwork = false, writableFs = false, root, work, snap, binary = 'bwrap', arch = process.arch, platform = process.platform }) {
   if (allowNetwork) return { network: 'NOT ISOLATED', wrapper: null, readonly_fs: false, probe: 'not probed (--allow-network)', filter: null };
   const unavailable = (why) => new IsolationError(`no isolation available (${why}); pass --allow-network to run without it`);
   if (platform !== 'linux') throw unavailable(`isolation needs Linux bwrap, this is ${platform}`);
   const filter = seccompFilter(arch);
   if (!filter) throw unavailable(`no seccomp program for architecture ${arch}`);
   const bin = which(binary);
-  const r = await probe({ work, snap, writableFs, binary: bin, filter });
+  const r = await probe({ root, work, snap, writableFs, binary: bin, filter });
   if (!r.ok) throw unavailable(r.reason);
   return { network: 'bwrap', wrapper: 'bwrap', binary: bin, readonly_fs: !writableFs, probe: r.reason, filter };
 }
@@ -198,7 +201,7 @@ export async function chooseIsolation({ allowNetwork = false, writableFs = false
 // Latency of `true`, 20 runs unwrapped and 20 wrapped, reported as two distributions. Differences of percentiles
 // of two independent samples can come out inverted (p95 < p50) or negative, so none is reported. null unwrapped.
 // `time(argv, extraInput)` returns the latencies of `runs` runs (tests inject it).
-export async function measureOverhead(isolation, { work, snap, runs = 20, time } = {}) {
+export async function measureOverhead(isolation, { root, work, snap, runs = 20, time } = {}) {
   if (!isolation.wrapper) return null;
   const timeRuns = time ?? (async (argv, extraInput) => {
     const xs = [];
@@ -211,6 +214,6 @@ export async function measureOverhead(isolation, { work, snap, runs = 20, time }
   const round = (x) => Math.round(x * 100) / 100;
   const summary = (xs) => ({ p50: round(percentile(xs, 0.5)), p95: round(percentile(xs, 0.95)) });
   const unwrapped = summary(await timeRuns(['true'], []));
-  const wrapped = summary(await timeRuns(wrapperArgv(isolation.wrapper, ['true'], { writableFs: !isolation.readonly_fs, work, snap, binary: isolation.binary }), [isolation.filter]));
+  const wrapped = summary(await timeRuns(wrapperArgv(isolation.wrapper, ['true'], { writableFs: !isolation.readonly_fs, root, work, snap, binary: isolation.binary }), [isolation.filter]));
   return { wrapped, unwrapped };
 }

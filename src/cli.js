@@ -8,7 +8,7 @@ import { hookFromFlags, loadSettings, checkPluginRoot, checkRelativeScript, Usag
 import { parseFilters, keepFile } from './filters.js';
 import { DEFAULT_MAX_LINE_BYTES } from './lines.js';
 import fs from 'node:fs';
-import { replay, IsolationError, DEFAULT_TIMEOUT_S } from './replay.js';
+import { replay, IsolationError, SnapDirError, DEFAULT_TIMEOUT_S } from './replay.js';
 import { buildReport, renderHuman, renderJson, OUTCOMES } from './report.js';
 import { makeRedactor, escapeControl } from './redact.js';
 
@@ -200,6 +200,7 @@ async function run(argv, io, setRedactor) {
     res = await replay({ ...opts, stderr: io.stderr, redact: red });
   } catch (e) {
     if (e instanceof IsolationError) { io.stderr.write(`hook-replay: ${red(e.message)}\n`); return 3; }
+    if (e instanceof SnapDirError) { io.stderr.write(`hook-replay: ${red(e.message)}\n`); return 1; }
     throw e;
   }
   const warnings = [...opts.loadWarnings, ...res.warnings];
