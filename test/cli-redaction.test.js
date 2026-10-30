@@ -41,11 +41,13 @@ const GAP_COMMANDS = [
   'hf auth login hf_cliHuggingFaceTok7015abcdefghijklm',
   'curl "https://h.invalid?x=1" -H "X-Signature: 7e6d5c4b3a291807f6e5d4c3b2a1908f7e6d5c4b"',
   `cp -r /root/.cliRootSecret7016 /tmp/${me.toUpperCase()}_backup && ls /home/${me}x/${me}_old`,
+  `OPENAI_KEY=cliOpenaiKey7020 kubectl patch -p '{"env":[{"name":"API_KEY","value":"cliK8sVal7021"}],"secrets": ["cliArr7023", "cliArr7024"]}'`,
+  "printf 'machine h.invalid login u password cliNetrc7022' > n && run --args '[\"--token\", \"cliArgv7025\"]' pwd=cliPwd7026",
 ];
 const GAP_PLANTED = ['cliJsonApiKey7001', 'cliJsonPw7002', 'cliJsonDbPw7003', 'cliFlagPw7004', 'cliFlagKey7005', 'cliFlagTok7006',
   'cliFlagSec7007', 'cliMysqlPw7008', 'cliHdrKey7009', 'cliHdrKey7010', 'cliStripeLive7011', 'cliStripeTest7012', 'cliStripeRk7013',
   'npm_cliNpmTok7014', 'hf_cliHuggingFaceTok7015', '7e6d5c4b3a291807f6e5d4c3b2a1908f7e6d5c4b', '/root/', 'glpat-FAKEtoolNameTok0000abcd',
-  'keyowner7017@example.org'];
+  'keyowner7017@example.org', 'cliOpenaiKey7020', 'cliK8sVal7021', 'cliNetrc7022', 'cliArr7023', 'cliArr7024', 'cliArgv7025', 'cliPwd7026'];
 const RUNTIME_PLANTED = me.length >= 3 ? [os.homedir(), me, me.toUpperCase()] : [os.homedir()];
 const GAP_SESSION = 'ffffffff-0000-4000-8000-000000000006';
 

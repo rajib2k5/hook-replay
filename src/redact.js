@@ -15,13 +15,35 @@ export function entropy(s) {
 // Rule 7's names, also with '-' (X-Api-Key, Api-Key) and with a closing quote before the separator ("api_key": ...).
 const NAMES = String.raw`SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|API[_-]?KEY|ACCESS[_-]KEY|PRIVATE[_-]KEY|ACCOUNT[_-]?KEY|SHARED[_-]?ACCESS[_-]?KEY`;
 const KEY_NAME = String.raw`\b([A-Z0-9_-]*(${NAMES})[A-Z0-9_-]*)(\\?["']?)`;
-// A value: a JSON string inside a JSON string (\"...\", where an inner quote is \\\" and an inner backslash \\\\),
-// a JSON string, a single-quoted string, or a word that is not an earlier rule's [REDACTED:...] marker.
-const VALUE = String.raw`(?!\\?["']?\[REDACTED:)(\\"(?:[^"\\]|\\\\\\"|\\\\\\\\|\\\\[^"\\]|\\[^"\\])*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|(?!\[REDACTED:)\S+)`;
+// A value: a number or boolean (kept by keepScalar unless the name ends in a secret word), a JSON string inside a
+// JSON string (\"...\", where an inner quote is \\\" and an inner backslash \\\\), a JSON string, a single-quoted
+// string, a flat [...] array or {...} object (every element goes, also inside a string), or a word that is not an
+// earlier rule's [REDACTED:...] marker.
+const VALUE = String.raw`(?!\\?["']?\[REDACTED:)(-?\d+(?:\.\d+)?(?![\w.:/-])|(?:true|false|null)(?![\w-])|\\"(?:[^"\\]|\\\\\\"|\\\\\\\\|\\\\[^"\\]|\\[^"\\])*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|\[[^\[\]\n]*\]|\{[^{}\n]*\}|(?!\[REDACTED:)\S+)`;
+// Key-context redaction keeps a number or boolean (max_tokens: 4096, PASSWORD_MIN_LENGTH=8,
+// TOKENIZERS_PARALLELISM=false); a number is still redacted when the name ends in a secret word (PASSWORD=1234).
+const SECRET_END = /(SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|KEY|PASS|PWD|AUTHORIZATION|COOKIE)\\?["']?$/i;
+export function keepScalar(name, value) {
+  if (typeof value === 'boolean' || value === null) return true;
+  if (typeof value === 'number') return !SECRET_END.test(name);
+  if (typeof value !== 'string') return false;
+  const v = value.replace(/^\\?["']|\\?["']$/g, '');
+  return /^(true|false|null)$/i.test(v) || (/^-?\d+(\.\d+)?$/.test(v) && !SECRET_END.test(name));
+}
+const keepOr = (m, name, value) => keepScalar(name, value) ? m : m.slice(0, m.length - value.length) + R('value');
 // Object keys whose whole value is redacted (report.js redactDeep): rule 7's names, plus a key that is or ends in
 // pass/pwd, Authorization, Cookie.
 const SECRET_KEY = new RegExp(String.raw`^[A-Z0-9_-]*(${NAMES})[A-Z0-9_-]*$|^([A-Z0-9_-]*[_-])?(PASS|PWD)$|AUTHORIZATION|^(SET-)?COOKIE$`, 'i');
-export const isSecretKey = (k) => typeof k === 'string' && SECRET_KEY.test(k);
+// Upper-case environment names that are or end in _KEY (OPENAI_KEY, KEY); lower case (sort_key) is left.
+const ENV_KEY = String.raw`(?:[A-Z0-9]+_)*KEY`;
+export const isSecretKey = (k) => typeof k === 'string' && (SECRET_KEY.test(k) || new RegExp(`^${ENV_KEY}$`).test(k));
+// A secret-named value in an object (name/key field) or a word that names one, for the {"name": X, "value": Y} pair.
+const SECRET_NAME = String.raw`[A-Z0-9_-]*(?:${NAMES})[A-Z0-9_-]*|(?:[A-Z0-9]+_)+(?:PASS|PWD|KEY)|KEY`;
+// A long flag that takes a secret; --password-stdin, --token-file and the like take none.
+const SECRET_FLAG = String.raw`--(?:[a-z0-9]+-)*(?:password|passwd|pass|token|secret|api-?key|access-key|private-key)(?:-[a-z0-9]+)*(?<!-(?:stdin|file|env|cmd|command|prompt))`;
+export const isSecretFlag = (s) => typeof s === 'string' && new RegExp(`^${SECRET_FLAG}$`, 'i').test(s);
+// .netrc tokens are separated by whitespace, also an escaped \n inside a JSON string.
+const SEP = String.raw`(?:\s|\\[nrt])+`;
 const AUTH_SCHEMES = 'Bearer|Basic|Token|Negotiate|NTLM|ApiKey';
 const AUTH_PARAM_SCHEMES = String.raw`Digest|OAuth|Hawk|AWS4-HMAC-SHA256|SCRAM-SHA-\d+`;
 
@@ -52,15 +74,32 @@ const RULES = [
   [/(\s(?:-u|--user)(?:\s+|=)?)("[^"\s:]*:[^"]*"|'[^'\s:]*:[^']*'|(?!\d+:\d+(?:\s|$))[^\s"':-][^\s"':]*:\S+)/g, `$1${R('value')}`],
   // sshpass -p <password> (also -p'x').
   [/(\bsshpass\b[^\n|;&]*?\s-p\s*)("[^"]*"|'[^']*'|\S+)/g, `$1${R('value')}`],
-  [new RegExp(`${KEY_NAME}\\s*[=:]\\s*${VALUE}`, 'gi'), (m, _name, _kw, _q, value) => m.slice(0, m.length - value.length) + R('value')],
-  // Environment-style names that are or end in PASS/PWD (DB_PASS=, MYSQL_PWD=, pass=); a bare PWD= (the shell's cwd) is left.
-  [new RegExp(String.raw`\b((?:[A-Z0-9]+_)+(?:PASS|PWD)|PASS)(\\?["']?)\s*[=:]\s*${VALUE}`, 'gi'), (m, _n, _q, value) => m.slice(0, m.length - value.length) + R('value')],
+  // docker/podman login -p <password> (--password-stdin takes none).
+  [/(\b(?:docker|podman|nerdctl|buildah|skopeo)\s+login\b[^\n|;&]*?\s-p\s*)("[^"]*"|'[^']*'|\S+)/g, `$1${R('value')}`],
+  // .netrc: machine <h> | default, then login/account/port pairs, then password <value>.
+  [new RegExp(String.raw`((?:\bmachine${SEP}\S+|\bdefault)(?:${SEP}(?:login|account|port)${SEP}\S+)*${SEP}password${SEP})(?!\[REDACTED:)((?:[^\s\\]|\\(?![nrt]))+)`, 'g'),
+    `$1${R('value')}`],
+  // {"name": "API_KEY", "value": ...} (Kubernetes env, AWS tags, ...) and the YAML form "- name: X\n  value: ...": the
+  // sibling value of a secret name. Name before value only (the structured tool_input path also takes value first).
+  [new RegExp(String.raw`((?:\\?["'])?\b(?:name|key)(?:\\?["'])?\s*[:=]\s*(\\?["']?)(?:${SECRET_NAME})\2(?:\s*,\s*|(?:\s|\\n)+)(?:\\?["'])?value(?:\\?["'])?\s*[:=]\s*)${VALUE}`, 'gi'),
+    (m, pre, _q, value) => keepOr(m, pre, value)],
+  // argv arrays: the element after a secret flag ("--token", "x"), also escaped inside a string.
+  [new RegExp(String.raw`((\\?")${SECRET_FLAG}\2\s*,\s*)${VALUE}`, 'gi'), (m, pre, _q, value) => keepOr(m, pre, value)],
+  [new RegExp(`${KEY_NAME}\\s*[=:]\\s*${VALUE}`, 'gi'), (m, name, _kw, _q, value) => keepOr(m, name, value)],
+  // Environment-style names that are or end in PASS/PWD (DB_PASS=, MYSQL_PWD=, pass=).
+  [new RegExp(String.raw`\b((?:[A-Z0-9]+_)+(?:PASS|PWD)|PASS)(\\?["']?)\s*[=:]\s*${VALUE}`, 'gi'), (m, name, _q, value) => keepOr(m, name, value)],
+  // A bare pwd= (ODBC Pwd=, pwd=) unless its value is a path or a variable: PWD=/srv/app is the shell's cwd.
+  [new RegExp(String.raw`\b(pwd)(\\?["']?)\s*[=:]\s*(?!\\?["']?[/~$.])${VALUE}`, 'gi'), (m, name, _q, value) => keepOr(m, name, value)],
+  // Upper-case environment names that are or end in _KEY (OPENAI_KEY=, KEY=); lower case (sort_key=) is left.
+  [new RegExp(String.raw`\b(${ENV_KEY})(\\?["']?)\s*[=:]\s*${VALUE}`, 'g'), (m, name, _q, value) => keepOr(m, name, value)],
   // CLI flags with a space before the value (--password=X is the rule above). The value may not look like a flag.
-  [/(--(?:[a-z0-9]+-)*(?:password|passwd|pass|token|secret|api-?key|access-key|private-key)(?:-[a-z0-9]+)*)(\s+)("[^"]*"|'[^']*'|[^\s-]\S*)/gi, `$1$2${R('value')}`],
+  [new RegExp(String.raw`(${SECRET_FLAG})(\s+)("[^"]*"|'[^']*'|[^\s-]\S*)`, 'gi'), `$1$2${R('value')}`],
   // mysql/mariadb family only: -p directly followed by >= 4 non-space characters is the password.
   [/(\b(?:mysql|mariadb)[\w-]*\s(?:[^\n|;&]*?\s)?)-p(\S{4,})/g, `$1-p${R('value')}`],
   // Hex (>= 32) is redacted only after a key-like name or an X- header: bare git SHAs must survive.
-  [/(\b[\w-]*(?:key|token|secret|auth|signature|sig|session|cookie|credential|pass)[\w-]*\\?["']?\s*[=:]\s*\\?["']?)[0-9a-f]{32,}(?![0-9a-z])/gi, `$1${R('hex_secret')}`],
+  // A session id (session_id, sessionId) is an identifier, not a secret, unless the name also says key, token, ...
+  [/(\b[\w-]*(?:key|token|secret|auth|signature|sig|session|cookie|credential|pass)[\w-]*\\?["']?\s*[=:]\s*\\?["']?)[0-9a-f]{32,}(?![0-9a-z])/gi,
+    (m, pre) => /session[_-]?id\b/i.test(pre) && !/key|token|secret|auth|sig|cookie|credential|pass/i.test(pre) ? m : pre + R('hex_secret')],
   [/(\bX-[\w-]+\s*:\s*)[0-9a-f]{32,}(?![0-9a-z])/gi, `$1${R('hex_secret')}`],
   [/([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/g, `$1${R('userinfo')}@`],
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, R('email')],

@@ -2,7 +2,7 @@
 // renderer can see raw text.
 import crypto from 'node:crypto';
 import { latencySummary } from './stats.js';
-import { escapeControl, isSecretKey } from './redact.js';
+import { escapeControl, isSecretKey, isSecretFlag, keepScalar } from './redact.js';
 
 export const SCHEMA = 'hook-replay/report@1';
 export const OUTCOMES = ['pass', 'allow', 'ask', 'defer', 'block', 'warn', 'stop', 'error', 'timeout', 'replay_timeout'];
@@ -30,13 +30,22 @@ const realNote = (event, real) => {
     error: 'the real session ran this call and it failed', none: 'no result for this call was recorded' }[real] ?? real;
 };
 
-// A value under a secret-named key ({"password": ...}, any type, nested or not) is replaced whole: redacting
-// keys and values apart let a structured MCP credential through. Off with --show-raw, like the rest.
+// A value under a secret-named key ({"password": ...}, nested or not) is replaced whole: redacting keys and values
+// apart let a structured MCP credential through. A number or boolean is kept unless the key ends in a secret word
+// (max_tokens: 4096 stays, api_key: 1234 goes). Also replaced: the sibling `value` of a `name`/`key` field that holds
+// a secret name ({"name": "API_KEY", "value": ...}), and the element after a secret flag in an array
+// (["--token", ...]). Off with --show-raw, like the rest.
+const HIDDEN = '[REDACTED:value]';
 function redactDeep(v, redact) {
+  const on = redact.enabled !== false;
   if (typeof v === 'string') return redact(v);
-  if (Array.isArray(v)) return v.map(x => redactDeep(x, redact));
+  if (Array.isArray(v)) return v.map((x, i) => on && i > 0 && isSecretFlag(v[i - 1]) && typeof x === 'string' ? HIDDEN : redactDeep(x, redact));
   if (v && typeof v === 'object') {
-    return Object.fromEntries(Object.entries(v).map(([k, x]) => [redact(k), redact.enabled !== false && isSecretKey(k) ? '[REDACTED:value]' : redactDeep(x, redact)]));
+    const named = ['name', 'key'].map(k => v[k]).find(n => isSecretKey(n));
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => {
+      const secret = on && (isSecretKey(k) ? !keepScalar(k, x) : k === 'value' && named !== undefined && !keepScalar(named, x));
+      return [redact(k), secret ? HIDDEN : redactDeep(x, redact)];
+    }));
   }
   return v;
 }

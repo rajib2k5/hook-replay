@@ -138,3 +138,24 @@ test('human table: the ALLOW column counts explicit allows', () => {
   const out = renderHuman(build([mk(1, 'allow'), mk(2, 'allow'), mk(3, 'pass'), mk(4, 'block')]));
   assert.match(out, /\nh1\s+PreToolUse\s+Bash\s+4\s+1\s+0\s+0\s+0\s+0\s+2\s+0\s+0\s+0\s/);
 });
+
+test('tool_input (round 4): the value beside a secret name/key field, and the element after a secret flag', () => {
+  const input = {
+    env: [{ name: 'API_KEY', value: 'r4StrK8s9130' }, { value: 'r4StrK8s9131', key: 'DB_PASSWORD' }, { name: 'LOG', value: 'debug' }],
+    args: ['--token', 'r4StrArgv9132', '-v', 'kept', '--password', 'r4StrArgv9133'],
+  };
+  const s = build([mk(1, 'block', { tool: 'mcp__k8s__apply', input })]).hooks[0].samples[0].tool_input;
+  for (const v of ['r4StrK8s9130', 'r4StrK8s9131', 'r4StrArgv9132', 'r4StrArgv9133']) assert.ok(!s.includes(v), `${v} in ${s}`);
+  const o = JSON.parse(s);
+  assert.deepEqual(o.env[2], { name: 'LOG', value: 'debug' });
+  assert.deepEqual(o.args, ['--token', '[REDACTED:value]', '-v', 'kept', '--password', '[REDACTED:value]']);
+});
+
+test('tool_input (round 4): numbers and booleans under secret-named keys are kept unless the key ends in a secret word', () => {
+  const input = { OPENAI_KEY: 'r4StrKey9134', max_tokens: 4096, input_tokens: 12, tokenCount: 5, stream_tokens: true, api_key: 77001234,
+    env: [{ name: 'PASSWORD_MIN_LENGTH', value: 8 }] };
+  const s = build([mk(1, 'block', { tool: 'mcp__llm__call', input })]).hooks[0].samples[0].tool_input;
+  for (const v of ['r4StrKey9134', '77001234']) assert.ok(!s.includes(v), `${v} in ${s}`);
+  const o = JSON.parse(s);
+  assert.deepEqual([o.max_tokens, o.input_tokens, o.tokenCount, o.stream_tokens, o.env[0].value], [4096, 12, 5, true, 8]);
+});

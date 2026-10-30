@@ -149,3 +149,55 @@ test('a 40-char base64 secret is still caught by the high-entropy rule, with and
   assert.equal(R('seed r3B64Q7wX2mZ9pL4vK8nR3tB6yH1cJ5dG0sA8f end'), 'seed [REDACTED:high_entropy] end');
   assert.equal(R('k wJr3lrXUtnFEMI/K7MDENG/bPxRfiCY8829XKEYz end'), 'k [REDACTED:high_entropy] end');
 });
+
+// Round-4 review leaks (red3.mjs; each value fresh and fake, used nowhere else). The value must be gone.
+const leaks4 = [
+  ['OPENAI_KEY=', 'OPENAI_KEY=r4OpenaiKey9101 node x.js', 'r4OpenaiKey9101'],
+  ['bare KEY=', 'KEY=r4BareKey9102 ./run', 'r4BareKey9102'],
+  ['FOO_KEY: (YAML)', 'STRIPE_WEBHOOK_KEY: r4YamlKey9116', 'r4YamlKey9116'],
+  ['.netrc, one line', 'machine h.invalid login bob password r4Netrc9103', 'r4Netrc9103'],
+  ['.netrc, multi-line', 'machine h.invalid\n  login u\n  password r4NetrcMl9104\n', 'r4NetrcMl9104'],
+  ['.netrc inside a JSON string', 'machine h.invalid\\n  login u\\n  password r4NetrcEsc9117\\n', 'r4NetrcEsc9117'],
+  ['.netrc default entry', 'default login u password r4NetrcDef9118', 'r4NetrcDef9118'],
+  ['env pair {"name","value"}', '{"name":"API_KEY","value":"r4K8sVal9105"}', 'r4K8sVal9105'],
+  ['env pair {"key","value"} with spaces', '{"key": "DB_PASSWORD", "value": "r4K8sVal9119"}', 'r4K8sVal9119'],
+  ['env pair escaped inside a string', '{\\"name\\":\\"GITHUB_TOKEN\\",\\"value\\":\\"r4K8sEsc9120\\"}', 'r4K8sEsc9120'],
+  ['env pair in YAML', 'env:\n  - name: DB_PASSWORD\n    value: r4YamlVal9106\n', 'r4YamlVal9106'],
+  ['argv array', 'args: ["--token","r4ArgvTok9107","--password","r4ArgvPw9108"]', 'r4ArgvTok9107|r4ArgvPw9108'],
+  ['argv array, escaped, with spaces', '[\\"--api-key\\", \\"r4ArgvEsc9121\\"]', 'r4ArgvEsc9121'],
+  ['lowercase pwd=', 'Server=db;uid=u;pwd=r4LowPwd9109;', 'r4LowPwd9109'],
+  ['ODBC Pwd=', 'Uid=u;Pwd=r4OdbcPwd9110;', 'r4OdbcPwd9110'],
+  ['docker login -p', 'docker login -u bob -p r4DockerPw9111 reg.invalid', 'r4DockerPw9111'],
+  ['"secrets" array, no spaces', '{"secrets":["r4Arr9112","r4Arr9113"]}', 'r4Arr9112|r4Arr9113'],
+  ['"secrets" array with spaces, inside a command', `curl -d '{"secrets": ["r4Arr9114", "r4Arr9115"]}'`, 'r4Arr9114|r4Arr9115'],
+  ['"tokens" array, escaped inside a string', '{\\"tokens\\": [\\"r4Arr9122\\", \\"r4Arr9123\\"]}', 'r4Arr9122|r4Arr9123'],
+  ['flat object under "credentials"', '{"credentials": {"u": "r4Obj9124", "v": "r4Obj9125"}}', 'r4Obj9124|r4Obj9125'],
+  ['a number under a name that ends in a secret word', 'PASSWORD=91267734 api_key: 55120933', '91267734|55120933'],
+];
+for (const [name, input, values] of leaks4) {
+  test(`round 4 leak: ${name}`, () => {
+    const out = R(input);
+    for (const v of values.split('|')) assert.ok(!out.includes(v), `${v} survives in ${out}`);
+    assert.match(out, /\[REDACTED:/);
+  });
+}
+
+// Round-4 over-redaction: key-context redaction keeps numbers and booleans (unless the name ends in a secret word),
+// and a session id is not a secret. Each string must come out unchanged.
+const keeps4 = [
+  '{"max_tokens": 4096, "input_tokens": 1234, "output_tokens": 77}',
+  '{"max_tokens":4096,"stream":true}',
+  'usage.input_tokens=1234 tokenCount: 12',
+  'PASSWORD_MIN_LENGTH=8 TOKENIZERS_PARALLELISM=false',
+  '"secretsEnabled": true, "token_budget": 0.5, "password_reset": null',
+  'session_id: 9f1c2e3d4b5a69788796a5b4c3d2e1f0',
+  'sessionId=9f1c2e3d4b5a69788796a5b4c3d2e1f0',
+  '{"session_id": "123e4567-e89b-12d3-a456-426614174000"}',
+  'PWD=/srv/app ls && cd "$PWD"',
+  'echo x | docker login --password-stdin reg.invalid',
+  'kubectl create secret --token-file /etc/k/t.txt',
+  'grep -r password_reset src/ && the password must be long',
+  '{"name": "LOG_LEVEL", "value": "debug"}',
+  '- name: PASSWORD_MIN_LENGTH\n  value: 8',
+];
+for (const input of keeps4) test(`round 4 keep: ${JSON.stringify(input).slice(0, 60)}`, () => assert.equal(R(input), input));
