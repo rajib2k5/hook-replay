@@ -100,3 +100,52 @@ test('a short username (3-5 chars) is redacted only between non-letters', () => 
   const o = { username: 'emu', homedir: '/home/emu' };
   assert.equal(R('emu_dir EMU2 emus lemur', o), '[user]_dir [user]2 emus lemur');
 });
+
+// Round-3 review leaks (each value fresh and fake, used nowhere else). The assertion is that the value is gone.
+const leaks = [
+  ['Authorization: Basic', 'curl -H "Authorization: Basic cjNCYXNpY1VzZXI6cjNCYXNpY1B3ODgwMQ==" https://h.invalid', 'cjNCYXNpY1VzZXI6cjNCYXNpY1B3ODgwMQ'],
+  ['Authorization: Digest (comma-separated params)', 'Authorization: Digest username="u", response="r3DigestResp8802"', 'r3DigestResp8802'],
+  ['JSON "Authorization": "Basic ..."', '{"Authorization": "Basic r3JsonBasic8803"}', 'r3JsonBasic8803'],
+  ['curl -u user:pw', 'curl -u admin:r3CurlUPw8804 https://h.invalid', 'r3CurlUPw8804'],
+  ['curl --user=user:pw', 'curl --user=admin:r3CurlUserPw8805 https://h.invalid', 'r3CurlUserPw8805'],
+  ['curl --user "user:pw"', 'curl --user "admin:r3CurlQuoted8806" https://h.invalid', 'r3CurlQuoted8806'],
+  ['DB_PASS=', 'DB_PASS=r3DbPass8807 ./run', 'r3DbPass8807'],
+  ['MYSQL_PWD=', 'MYSQL_PWD=r3MysqlPwd8808 mysql', 'r3MysqlPwd8808'],
+  ['PGPASSWORD=', 'PGPASSWORD=r3PgPw8809 psql', 'r3PgPw8809'],
+  ['Azure AccountKey=', 'DefaultEndpointsProtocol=https;AccountName=x;AccountKey=r3AzAcctKey8810abc==;EndpointSuffix=core.windows.net', 'r3AzAcctKey8810'],
+  ['Azure SharedAccessKey=', 'Endpoint=sb://x.servicebus.windows.net/;SharedAccessKeyName=root;SharedAccessKey=r3AzSasKey8811=', 'r3AzSasKey8811'],
+  ['Cookie:', 'curl -H "Cookie: session=r3Cookie8812; theme=dark" https://h.invalid', 'r3Cookie8812'],
+  ['Set-Cookie:', 'Set-Cookie: sid=r3SetCookie8813; Path=/; HttpOnly', 'r3SetCookie8813'],
+  ['JSON "Cookie": "..."', '{"Cookie": "sid=r3JsonCookie8814"}', 'r3JsonCookie8814'],
+  ['sshpass -p', 'sshpass -p r3SshPass8815 ssh host', 'r3SshPass8815'],
+  ['sshpass -pX', "sshpass -p'r3SshPassQ8816' ssh host", 'r3SshPassQ8816'],
+  ['truncated PEM (BEGIN, no END)', '-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1yM1RydW5jODgxNw\nAAAA', 'yM1RydW5jODgxNw'],
+  ['escaped quote inside an escaped JSON string', '{\\"password\\": \\"r3Esc\\\\\\"Pw8818\\"}', 'Pw8818'],
+  ['URL ?token=', 'https://h.invalid/x?token=r3UrlTok8819&page=2', 'r3UrlTok8819'],
+  ['URL &access_token=', 'https://h.invalid/x?a=1&access_token=r3UrlAt8820#frag', 'r3UrlAt8820'],
+  ['URL api_key, apikey, key', 'https://h.invalid/?api_key=r3UrlAk8821&apikey=r3UrlAk8822&key=r3UrlKey8823', 'r3UrlAk8821|r3UrlAk8822|r3UrlKey8823'],
+  ['URL secret, password', 'https://h.invalid/?secret=r3UrlSec8824&password=r3UrlPw8825', 'r3UrlSec8824|r3UrlPw8825'],
+  ['URL sig, signature (SAS)', 'https://a.blob.core.windows.net/c/b?sv=2020&sig=r3UrlSig8826%3D&signature=r3UrlSig8827', 'r3UrlSig8826|r3UrlSig8827'],
+];
+for (const [name, input, values] of leaks) {
+  test(`round 3 leak: ${name}`, () => {
+    const out = R(input);
+    for (const v of values.split('|')) assert.ok(!out.includes(v), `${v} survives in ${out}`);
+    assert.match(out, /\[REDACTED:/);
+  });
+}
+
+test('the URL query rule leaves the other parameters and the path alone', () => {
+  assert.equal(R('https://h.invalid/a/b?page=2&token=r3UrlTok8828&sort=asc'), 'https://h.invalid/a/b?page=2&token=[REDACTED:value]&sort=asc');
+});
+
+test('ordinary paths survive the high-entropy rule ("/" is not part of a token)', () => {
+  const paths = ['$CLAUDE_PROJECT_DIR/examples/hooks/deny-rm.js', '/usr/lib/node_modules/npm/node_modules/@npmcli/arborist/lib/index.js',
+    'src/components/UserProfileCard/UserProfileCardHeader.tsx'];
+  for (const p of paths) assert.equal(R(p), p);
+});
+
+test('a 40-char base64 secret is still caught by the high-entropy rule, with and without "/"', () => {
+  assert.equal(R('seed r3B64Q7wX2mZ9pL4vK8nR3tB6yH1cJ5dG0sA8f end'), 'seed [REDACTED:high_entropy] end');
+  assert.equal(R('k wJr3lrXUtnFEMI/K7MDENG/bPxRfiCY8829XKEYz end'), 'k [REDACTED:high_entropy] end');
+});

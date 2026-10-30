@@ -89,3 +89,20 @@ test('a PostToolUse block (exit2_feedback / decision_block_feedback) says it is 
     decision_block_feedback: 'feedback to Claude; the tool already ran', exit2: null });
   assert.equal(renderHuman(m).split('\n').filter(l => l.trim() === 'effect: feedback to Claude; the tool already ran').length, 2);
 });
+
+test('tool_input: the whole value under a secret-named key is redacted, whatever its type (MCP inputs are structured)', () => {
+  const input = { host: 'db', user: 'u', password: 'r3McpPw8830', db_password: 99887766, clientSecret: { a: ['r3Nested8831'] },
+    Authorization: 'r3McpAuth8832', private_key_id: 'r3McpKid8833', note: 'kept' };
+  const m = build([mk(1, 'block', { tool: 'mcp__db__connect', input })]);
+  const s = m.hooks[0].samples[0].tool_input;
+  for (const v of ['r3McpPw8830', '99887766', 'r3Nested8831', 'r3McpAuth8832', 'r3McpKid8833']) assert.ok(!s.includes(v), `${v} in ${s}`);
+  assert.deepEqual(JSON.parse(s), { host: 'db', user: 'u', password: '[REDACTED:value]', db_password: '[REDACTED:value]',
+    clientSecret: '[REDACTED:value]', Authorization: '[REDACTED:value]', private_key_id: '[REDACTED:value]', note: 'kept' });
+});
+
+test('sample excerpts: a private key that runs past the 300-char cut is redacted before the cut', () => {
+  const pem = '-----BEGIN RSA PRIVATE KEY-----\n' + 'r3PemBody8834'.repeat(40) + '\n-----END RSA PRIVATE KEY-----';
+  const m = build([mk(1, 'block', { input: { command: `${'y'.repeat(250)} ${pem}` }, reason: `${'z'.repeat(280)} ${pem}` })]);
+  const s = m.hooks[0].samples[0];
+  assert.ok(!s.tool_input.includes('r3PemBody8834') && !s.reason.includes('r3PemBody8834'));
+});

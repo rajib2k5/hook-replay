@@ -160,3 +160,36 @@ test('an internal error prints a redacted message and no stack trace, unless HOO
   assert.match(dbg.err, /\n    at /);
   assert.ok(!dbg.err.includes('cliInternalKey7021') && !dbg.err.includes(os.homedir()));
 });
+
+// Round-3 review: structured MCP credentials and header/CLI forms that leaked through the real CLI.
+const R3_SESSION = 'ffffffff-0000-4000-8000-000000000007';
+const R3_TOOLS = [
+  ['mcp__db__connect', { host: 'db', user: 'u', password: 'r3CliMcpPw8840', port: 55443322, opts: { api_token: ['r3CliNested8841'] } }],
+  ['Bash', { command: 'curl -H "Authorization: Basic cjNDbGlCYXNpYzg4NDI=" https://h.invalid' }],
+  ['Bash', { command: 'DB_PASS=r3CliDbPass8843 ./run && curl -u admin:r3CliCurlU8844 "https://h.invalid/?token=r3CliUrlTok8845"' }],
+];
+const R3_PLANTED = ['r3CliMcpPw8840', 'r3CliNested8841', 'cjNDbGlCYXNpYzg4NDI', 'r3CliDbPass8843', 'r3CliCurlU8844', 'r3CliUrlTok8845'];
+const ANY_DENY = `node -e "process.stdin.resume().on('end',()=>console.log(JSON.stringify({hookSpecificOutput:{hookEventName:'PreToolUse',permissionDecision:'deny',permissionDecisionReason:'no'}})))"`;
+
+for (const mode of ['table', 'json']) {
+  test(`(d) round 3, ${mode}: structured MCP credentials and Basic/-u/DB_PASS/URL tokens do not leak; --show-raw shows them`, (t) => {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-redact-'));
+    t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+    const dir = path.join(d, 'projects', '-srv-proj');
+    fs.mkdirSync(dir, { recursive: true });
+    const env = (type, uuid, message) => JSON.stringify({ parentUuid: null, isSidechain: false, cwd: '/srv/proj', sessionId: R3_SESSION,
+      type, message, uuid, timestamp: '2026-10-05T07:00:00.000Z' });
+    const lines = [env('user', 'r3-u', { role: 'user', content: 'go' })];
+    R3_TOOLS.forEach(([name, input], i) => {
+      lines.push(env('assistant', `r3-a-${i}`, { id: `msg_R3${i}`, role: 'assistant', content: [{ type: 'tool_use', id: `toolu_R3${i}`, name, input }], stop_reason: 'tool_use' }));
+      lines.push(env('user', `r3-r-${i}`, { role: 'user', content: [{ tool_use_id: `toolu_R3${i}`, type: 'tool_result', content: 'ok' }] }));
+    });
+    fs.writeFileSync(path.join(dir, `${R3_SESSION}.jsonl`), lines.join('\n') + '\n');
+    const flags = mode === 'json' ? ['--json'] : [];
+    const red = cli(d, flags, ANY_DENY);
+    assert.equal(red.status, 0, red.stderr);
+    for (const v of R3_PLANTED) assert.ok(!(red.stdout + red.stderr).includes(v), `redacted ${mode} output contains ${v}`);
+    const raw = cli(d, [...flags, '--show-raw'], ANY_DENY);
+    for (const v of R3_PLANTED) assert.ok(raw.stdout.includes(v), `--show-raw ${mode} output lacks ${v}`);
+  });
+}

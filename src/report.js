@@ -2,7 +2,7 @@
 // renderer can see raw text.
 import crypto from 'node:crypto';
 import { latencySummary } from './stats.js';
-import { escapeControl } from './redact.js';
+import { escapeControl, isSecretKey } from './redact.js';
 
 export const SCHEMA = 'hook-replay/report@1';
 export const OUTCOMES = ['pass', 'allow', 'ask', 'defer', 'block', 'warn', 'stop', 'error', 'timeout', 'replay_timeout'];
@@ -30,10 +30,14 @@ const realNote = (event, real) => {
     error: 'the real session ran this call and it failed', none: 'no result for this call was recorded' }[real] ?? real;
 };
 
+// A value under a secret-named key ({"password": ...}, any type, nested or not) is replaced whole: redacting
+// keys and values apart let a structured MCP credential through. Off with --show-raw, like the rest.
 function redactDeep(v, redact) {
   if (typeof v === 'string') return redact(v);
   if (Array.isArray(v)) return v.map(x => redactDeep(x, redact));
-  if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [redact(k), redactDeep(x, redact)]));
+  if (v && typeof v === 'object') {
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [redact(k), redact.enabled !== false && isSecretKey(k) ? '[REDACTED:value]' : redactDeep(x, redact)]));
+  }
   return v;
 }
 // Mechanisms whose `block` cannot stop anything: the tool already ran (DESIGN.md §6).
@@ -49,7 +53,8 @@ function sample(r, hook, redact) {
     tool: redact(r.tool),
   };
   if (EFFECT[r.verdict.mechanism]) s.effect = EFFECT[r.verdict.mechanism];
-  const excerpt = typeof input === 'string' ? redact(input) : JSON.stringify(redactDeep(input ?? null, redact));
+  // Redacted in full before the cut, and the serialised JSON once more, so a secret spread over a key and its value is seen whole.
+  const excerpt = typeof input === 'string' ? redact(input) : redact(JSON.stringify(redactDeep(input ?? null, redact)));
   s[r.event === 'Stop' ? 'last_assistant_message' : 'tool_input'] = cut(excerpt);
   s.reason = cut(redact(r.verdict.reason ?? (r.run.stderr || null)));
   s.exit_code = r.run.exitCode;
