@@ -3,6 +3,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { openSourceSync } from './lines.js';
 
 const COPY_CHUNK = 1024 * 1024;
 const { O_WRONLY, O_CREAT, O_EXCL, O_NOFOLLOW } = fs.constants;
@@ -34,7 +35,7 @@ export class Snapshot {
     this.dir = dir;
     this.base = base;
     this.onTamper = onTamper;
-    this.srcFd = fs.openSync(srcPath, 'r');
+    this.srcFd = openSourceSync(srcPath);
     this.#open();
     this.written = 0;
     this.#mark();

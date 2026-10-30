@@ -58,3 +58,29 @@ test('corpus.orphan_tool_results counts a tool_result that arrives in a later fi
   assert.equal(r.status, 0, r.stderr);
   assert.equal(JSON.parse(r.stdout).corpus.orphan_tool_results, 1);
 });
+
+// Round-5 review (fifo.sh): a hook replaced a transcript not yet processed with a FIFO, and the source open blocked
+// hook-replay for good (SIGINT and SIGTERM handlers could not run). Here the test plants the FIFO itself, after the
+// scan, at replay's first stderr write; the replay runs in a child so a hang fails the test instead of stalling it.
+const PLANT_FIFO = `import { replay } from ${JSON.stringify(path.join(root, 'src/replay.js'))};
+import { hookFromFlags } from ${JSON.stringify(path.join(root, 'src/hooks.js'))};
+import fs from 'node:fs'; import { execFileSync } from 'node:child_process';
+const [projects, victim] = process.argv.slice(1);
+let planted = false;
+const stderr = { write() { if (!planted) { planted = true; fs.unlinkSync(victim); execFileSync('mkfifo', [victim]); } } };
+const res = await replay({ projectsDir: projects, hooks: [hookFromFlags({ hook: 'true', event: 'PreToolUse' })], allowNetwork: true, stderr });
+console.log(JSON.stringify({ planted, unreadable: res.corpus.files_unreadable, runs: res.results.length }));`;
+
+test('a source replaced by a FIFO after the scan is counted unreadable and skipped; the open does not block', (t) => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'hr-fifo-'));
+  t.after(() => fs.rmSync(d, { recursive: true, force: true }));
+  const proj = path.join(d, 'projects', '-home-fixture-proj');
+  fs.mkdirSync(proj, { recursive: true });
+  fs.copyFileSync(path.join(fixture, A), path.join(proj, A));
+  fs.copyFileSync(path.join(fixture, C), path.join(proj, C));
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', PLANT_FIFO, path.join(d, 'projects'), path.join(proj, A)],
+    { encoding: 'utf8', timeout: 15000, killSignal: 'SIGKILL' });
+  assert.equal(r.signal, null, `replay blocked on the FIFO (killed after 15 s): ${r.stderr}`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(JSON.parse(r.stdout), { planted: true, unreadable: 1, runs: 1 });
+});

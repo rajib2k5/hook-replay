@@ -4,6 +4,22 @@ import fs from 'node:fs';
 
 export const DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024;
 
+// A transcript source is opened without blocking and without following a last-component link, and must be a regular
+// file: a hook can replace a transcript not yet read with a FIFO, whose blocking open would stall hook-replay for good,
+// signal handlers included (round-5 review, fifo.sh). Failing that, a SourceError: the file is counted unreadable.
+const { O_RDONLY, O_NONBLOCK, O_NOFOLLOW } = fs.constants;
+export const SOURCE_FLAGS = O_RDONLY | O_NONBLOCK | O_NOFOLLOW;
+export class SourceError extends Error {}
+const notRegular = (file) => new SourceError(`${file} is not a regular file`);
+
+export function openSourceSync(file) {
+  let fd;
+  try { fd = fs.openSync(file, SOURCE_FLAGS); } catch (e) { throw new SourceError(`${file}: ${e.code ?? e.message}`); }
+  if (fs.fstatSync(fd).isFile()) return fd;
+  fs.closeSync(fd);
+  throw notRegular(file);
+}
+
 // In-memory form, used by tests and small inputs. Each line: {offset, length, lineNo, bytes|null}; length
 // excludes the '\n'. bytes is null when length > maxLineBytes.
 export function splitLines(buf, { maxLineBytes = DEFAULT_MAX_LINE_BYTES } = {}) {
@@ -22,9 +38,12 @@ export function splitLines(buf, { maxLineBytes = DEFAULT_MAX_LINE_BYTES } = {}) 
 
 // Streaming form over a file. The size at open is EOF: live transcripts grow while we read them.
 export async function* readLines(file, { maxLineBytes = DEFAULT_MAX_LINE_BYTES, chunkSize = 1024 * 1024 } = {}) {
-  const fh = await fs.promises.open(file, 'r');
+  let fh;
+  try { fh = await fs.promises.open(file, SOURCE_FLAGS); } catch (e) { throw new SourceError(`${file}: ${e.code ?? e.message}`); }
   try {
-    const { size } = await fh.stat();
+    const st = await fh.stat();
+    if (!st.isFile()) throw notRegular(file);
+    const { size } = st;
     const chunk = Buffer.alloc(Math.max(1, Math.min(chunkSize, size || 1)));
     let pos = 0;
     let lineNo = 0;

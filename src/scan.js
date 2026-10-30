@@ -2,7 +2,7 @@
 // (point, hook) pairs run, honouring --limit in deterministic order. Holds only keys, not payloads.
 import fs from 'node:fs';
 import os from 'node:os';
-import { readLines } from './lines.js';
+import { readLines, openSourceSync } from './lines.js';
 import { Reconstructor, emptyStats } from './reconstruct.js';
 import { matches } from './matcher.js';
 import { keepPoint } from './filters.js';
@@ -28,7 +28,7 @@ export async function scan({ files, hooks, filters = {}, includeSubagents = true
   let unreadable = 0;
   for (const file of files) {
     // A file we cannot open is counted and skipped; nothing of it is selected, so the run never opens it.
-    try { fs.closeSync(fs.openSync(file.path, 'r')); } catch { unreadable++; continue; }
+    try { fs.closeSync(openSourceSync(file.path)); } catch { unreadable++; continue; }
     if (!file.subagent) sessions.add(file.sessionUuid);
     const sel = new Map();
     for await (const p of filePoints(file, { includeSubagents, maxLineBytes, homedir }, stats)) {

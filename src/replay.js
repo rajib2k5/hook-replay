@@ -6,6 +6,7 @@ import path from 'node:path';
 import { discover } from './corpus.js';
 import { scan, filePoints, toolOf } from './scan.js';
 import { Snapshot } from './snapshot.js';
+import { SourceError } from './lines.js';
 import { runHook, buildEnv, commandArgv, killRunning } from './runner.js';
 import { classify } from './classify.js';
 import { keepFile } from './filters.js';
@@ -103,7 +104,14 @@ export async function replay(opts) {
     const jobs = files.map((f, n) => ({ f, n })).filter(({ f }) => s.selected.has(f.relPath));
     await pool(jobs, concurrency, async ({ f, n }) => {
       const sel = s.selected.get(f.relPath);
-      const snap = new Snapshot(f.path, snapDir, `t-${n}`, { onTamper });
+      // A source that is no longer a readable regular file (a hook replaced it, a FIFO say) is counted and skipped:
+      // both opens below fail before any point of it runs.
+      let snap;
+      try { snap = new Snapshot(f.path, snapDir, `t-${n}`, { onTamper }); } catch (e) {
+        if (!(e instanceof SourceError)) throw e;
+        s.corpus.files_unreadable++;
+        return;
+      }
       try {
         for await (const p of filePoints(f, { includeSubagents, maxLineBytes, homedir })) {
           const ids = sel.get(p.key);
@@ -130,6 +138,9 @@ export async function replay(opts) {
               realSignal: p.realSignal, fidelity: changed ? [...p.fidelity, 'snapshot_tampered'] : p.fidelity, run, verdict });
           }
         }
+      } catch (e) {
+        if (!(e instanceof SourceError)) throw e;
+        s.corpus.files_unreadable++;
       } finally {
         snap.close();
       }
