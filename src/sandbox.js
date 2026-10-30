@@ -60,15 +60,19 @@ const listenOn = (...args) => new Promise((resolve, reject) => {
   server.listen(...args, () => resolve({ server, accepted }));
 });
 
-// Checks the real property, failing closed: (1) a Unix socket the probe listens on in tmp, (2) TCP listeners
-// on 127.0.0.1 and on a non-loopback host address must all be unreachable from inside, and (3) the wrapper
-// must exit 0 for a trivial command. `wrap` builds the wrapped argv (tests inject broken wrappers).
-export async function probe({ tmp, readonlyFs = false, binary, filter = seccompFilter(), wrap } = {}) {
+// Checks the real property, failing closed. Listeners: a Unix socket in tmp (which every wrapper mode binds into
+// the sandbox, so only seccomp can stop the connect), TCP on 127.0.0.1 and on a non-loopback host address.
+// (1) The wrapper must exit 0 for a trivial command. (2) Inside, every connect must fail with EACCES (what the
+// seccomp socket() rule returns): ENOENT or ECONNREFUSED would mean only a hidden path or an empty network
+// namespace, which a different socket defeats. (3) No listener may see a connection. (4) Positive control: the
+// same client run unwrapped must connect to every listener, so the listeners were reachable to begin with.
+// `wrap` builds the wrapped argv and `control` the unwrapped one (tests inject broken ones).
+export async function probe({ tmp, readonlyFs = false, binary, filter = seccompFilter(), wrap, control = (argv) => argv } = {}) {
   const w = wrap ?? ((argv) => wrapperArgv('bwrap', argv, { readonlyFs, tmp, binary }));
   const extraInput = filter ? [filter] : [];
-  const run = (argv) => runHook({ argv: w(argv), stdin: '', env: { PATH: process.env.PATH }, cwd: tmp, timeoutMs: 10000,
-    timeoutSource: 'replay_cap', extraInput });
-  const trivial = await run(['true']);
+  const run = (argv, input = extraInput) => runHook({ argv, stdin: '', env: { PATH: process.env.PATH }, cwd: tmp, timeoutMs: 10000,
+    timeoutSource: 'replay_cap', extraInput: input });
+  const trivial = await run(w(['true']));
   if (trivial.spawnError) return { ok: false, reason: `bwrap: ${trivial.spawnError}` };
   if (trivial.exitCode !== 0) return { ok: false, reason: `bwrap: exit ${trivial.exitCode ?? trivial.signal} for a trivial command: ${trivial.stderr.trim().slice(0, 200)}` };
   const listeners = [];
@@ -80,16 +84,22 @@ export async function probe({ tmp, readonlyFs = false, binary, filter = seccompF
     await add('tcp 127.0.0.1', [0, '127.0.0.1'], (s) => ({ port: s.address().port, host: '127.0.0.1' }));
     const host = hostAddress();
     if (host) await add('tcp host address', [0, host], (s) => ({ port: s.address().port, host }));
-    const r = await run([process.execPath, '-e', CLIENT, JSON.stringify(targets)]);
+    const client = [process.execPath, '-e', CLIENT, JSON.stringify(targets)];
+    const parse = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
+    const r = await run(w(client));
     if (r.spawnError) return { ok: false, reason: `bwrap: ${r.spawnError}` };
     if (r.exitCode !== 0) return { ok: false, reason: `bwrap: probe exit ${r.exitCode ?? r.signal}: ${r.stderr.trim().slice(0, 200)}` };
-    let got;
-    try { got = JSON.parse(r.stdout); } catch { return { ok: false, reason: 'bwrap: probe printed no result' }; }
-    const bad = targets.filter(t => typeof got[t.name] !== 'string' || !got[t.name].startsWith('error '));
-    if (bad.length) return { ok: false, reason: `bwrap: ${bad.map(t => `${t.name} ${got[t.name] ?? 'missing'}`).join(', ')}` };
+    const got = parse(r);
+    if (!got) return { ok: false, reason: 'bwrap: probe printed no result' };
+    const bad = targets.filter(t => got[t.name] !== 'error EACCES');
+    if (bad.length) return { ok: false, reason: `bwrap: not EACCES inside: ${bad.map(t => `${t.name} ${got[t.name] ?? 'missing'}`).join(', ')}` };
     const reached = listeners.filter(l => l.accepted.length > 0);
     if (reached.length) return { ok: false, reason: `bwrap: listener reached: ${reached.map(l => l.name).join(', ')}` };
-    return { ok: true, reason: `bwrap+seccomp: ${targets.map(t => `${t.name} ${got[t.name]}`).join(', ')}` };
+    const c = parse(await run(control(client), []));
+    const unreached = targets.filter(t => !c || c[t.name] !== 'connected');
+    if (unreached.length) return { ok: false, reason: `bwrap: probe control failed, unwrapped client did not connect: ${unreached.map(t => `${t.name} ${c?.[t.name] ?? 'missing'}`).join(', ')}` };
+    const names = targets.map(t => t.name).join(', ');
+    return { ok: true, reason: `bwrap+seccomp: socket() EACCES inside for ${names}; all connected unwrapped` };
   } finally {
     for (const l of listeners) l.server.close();
   }

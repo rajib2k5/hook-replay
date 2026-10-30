@@ -268,3 +268,32 @@ test('sandbox overhead: wrapped and unwrapped `true` are reported as two distrib
   assert.deepEqual(o, { wrapped: { p50: 20, p95: 21 }, unwrapped: { p50: 1, p95: 30 } });
   assert.equal(await measureOverhead({ wrapper: null }, { tmp: '/nonexistent', time }), null);
 });
+
+// Round-3 review: the probe took any "error <code>" as isolated, so a wrapper that only hid the probe's socket
+// (ENOENT) and refused TCP (ECONNREFUSED) passed, and the same wrapper then reached the host's D-Bus socket.
+const noSeccomp = (argv) => ['bwrap', '--dev-bind', '/', '/', '--tmpfs', '/tmp', '--unshare-net', '--', ...argv];
+test('probe rejects a wrapper without seccomp that hides /tmp and unshares the network', { skip }, async (t) => {
+  const r = await probe({ tmp: tmpDir(t), wrap: noSeccomp });
+  assert.equal(r.ok, false, r.reason);
+});
+
+test('probe rejects the real bwrap argv with --seccomp removed', { skip }, async (t) => {
+  const tmp = tmpDir(t);
+  const wrap = (argv) => { const a = wrapperArgv('bwrap', argv, { tmp }); const i = a.indexOf('--seccomp'); a.splice(i, 2); return a; };
+  const r = await probe({ tmp, wrap });
+  assert.equal(r.ok, false, r.reason);
+  assert.match(r.reason, /not EACCES/);
+});
+
+test('probe fails when its positive control cannot connect unwrapped', { skip }, async (t) => {
+  const r = await probe({ tmp: tmpDir(t), control: (argv) => ['sh', '-c', 'echo "{}"'] });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /control/);
+});
+
+test('probe reason states what was measured', { skip }, async (t) => {
+  const r = await probe({ tmp: tmpDir(t) });
+  assert.equal(r.ok, true, r.reason);
+  assert.match(r.reason, /socket\(\) EACCES inside for unix, tcp 127\.0\.0\.1/);
+  assert.match(r.reason, /all connected unwrapped/);
+});
