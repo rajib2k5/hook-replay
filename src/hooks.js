@@ -34,8 +34,22 @@ const INTERPRETERS = new Set(['node', 'nodejs', 'deno', 'bun', 'python', 'python
 // Hooks run in a temp cwd, so `node examples/hooks/x.js` would fail on every point (exit 1) if replay ran it. When
 // the script argument is a relative path that exists from hook-replay's own cwd, stop at load time instead (exit 2).
 // Resolving it for the user is not done: it would not be what the hook does where it is configured.
-export function checkRelativeScript(h, cwd = process.cwd()) {
-  const toks = (Array.isArray(h.args) ? [h.command, ...h.args] : h.command.trim().split(/\s+/)).map(t => t.replace(/^['"]|['"]$/g, ''));
+// Leading NAME=value assignments and an `env` prefix (with its options and assignments) are skipped to reach the
+// command. A command nested in `sh -c '...'` is not looked into.
+const ENV_ARG_OPTS = new Set(['-u', '--unset', '-C', '--chdir', '-S', '--split-string']);
+const ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=/;
+function skipPrefix(toks) {
+  let i = 0;
+  while (i < toks.length && ASSIGN.test(toks[i])) i++;
+  if (toks[i] && toks[i].split('/').pop() === 'env') {
+    i++;
+    while (i < toks.length && (toks[i].startsWith('-') || ASSIGN.test(toks[i]))) i += ENV_ARG_OPTS.has(toks[i]) ? 2 : 1;
+  }
+  return toks.slice(i);
+}
+
+export function checkRelativeScript(h, { cwd = process.cwd(), cwdMode = 'temp' } = {}) {
+  const toks = skipPrefix((Array.isArray(h.args) ? [h.command, ...h.args] : h.command.trim().split(/\s+/)).map(t => t.replace(/^['"]|['"]$/g, '')));
   const cands = [];
   if (toks[0] && toks[0].includes('/')) cands.push(toks[0]);
   if (toks[0] && INTERPRETERS.has(toks[0].split('/').pop())) { const arg = toks.slice(1).find(t => !t.startsWith('-')); if (arg) cands.push(arg); }
@@ -45,7 +59,9 @@ export function checkRelativeScript(h, cwd = process.cwd()) {
     try { isFile = fs.statSync(path.resolve(cwd, c)).isFile(); } catch { /* not here */ }
     if (isFile) {
       const rel = c.replace(/^\.\//, '');
-      throw new UsageError(`hook ${h.id} (${h.source}): script ${c} is a relative path, and replay runs hooks in a temp directory; ` +
+      const where = cwdMode === 'recorded' ? "with --cwd recorded replay runs hooks in each call's recorded cwd (a temp directory when it no longer exists)"
+        : 'replay runs hooks in a temp directory';
+      throw new UsageError(`hook ${h.id} (${h.source}): script ${c} is a relative path, and ${where}; ` +
         `use an absolute path or $CLAUDE_PROJECT_DIR/${rel}`);
     }
   }
@@ -61,7 +77,7 @@ export function checkPluginRoot(h, pluginRoot) {
 }
 
 // Reads .hooks.{PreToolUse,PostToolUse,Stop}[] of a settings.json or plugin hooks.json. Returns {hooks, warnings}.
-export function loadSettings(file, { ignoreIf = false, pluginRoot } = {}) {
+export function loadSettings(file, { ignoreIf = false, pluginRoot, cwdMode = 'temp' } = {}) {
   let doc;
   try { doc = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { throw new UsageError(`cannot load ${file}: ${e.message}`); }
   const all = doc && typeof doc === 'object' && doc.hooks && typeof doc.hooks === 'object' ? doc.hooks : {};
@@ -97,7 +113,7 @@ export function loadSettings(file, { ignoreIf = false, pluginRoot } = {}) {
         if (!args && x.shell === 'bash') h.shell = 'bash';
         h.key = hookKey(h);
         checkPluginRoot(h, pluginRoot);
-        checkRelativeScript(h);
+        checkRelativeScript(h, { cwdMode });
         hooks.push(h);
       });
     });

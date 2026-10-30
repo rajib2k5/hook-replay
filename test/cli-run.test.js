@@ -117,11 +117,18 @@ test('the filesystem is read-only by default; --writable-fs opts out with a warn
 });
 
 test('a relative hook script path that exists from the current directory is a usage error (hooks run in a temp dir)', (t) => {
-  for (const hook of ['node examples/hooks/deny-rm.js', 'sh ./examples/hooks/post-generated.sh', 'examples/hooks/post-generated.sh']) {
+  for (const hook of ['node examples/hooks/deny-rm.js', 'sh ./examples/hooks/post-generated.sh', 'examples/hooks/post-generated.sh',
+    'FOO=1 node examples/hooks/deny-rm.js', '/usr/bin/env node examples/hooks/deny-rm.js', 'env -i FOO=1 BAR=2 node examples/hooks/deny-rm.js',
+    'env -u HOME node examples/hooks/deny-rm.js', 'LANG=C ./examples/hooks/post-generated.sh']) {
     const r = cli(['--hook', hook, '--event', 'PreToolUse', '--dry-run']);
     assert.equal(r.status, 2, hook);
-    assert.match(r.stderr, /is a relative path.*absolute path or \$CLAUDE_PROJECT_DIR\/examples\/hooks\//, hook);
+    assert.match(r.stderr, /is a relative path, and replay runs hooks in a temp directory.*absolute path or \$CLAUDE_PROJECT_DIR\/examples\/hooks\//, hook);
   }
+  // --cwd recorded runs a hook in each point's recorded cwd, not a temp directory, and the message says so.
+  const rec = cli(['--hook', 'node examples/hooks/deny-rm.js', '--event', 'PreToolUse', '--cwd', 'recorded', '--dry-run']);
+  assert.equal(rec.status, 2);
+  assert.match(rec.stderr, /is a relative path, and with --cwd recorded replay runs hooks in each call's recorded cwd \(a temp directory when it no longer exists\)/);
+  assert.doesNotMatch(rec.stderr, /runs hooks in a temp directory;/);
   const d = tmpDir(t);
   const f = path.join(d, 'settings.json');
   fs.writeFileSync(f, JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'node', args: ['examples/hooks/deny-rm.js'] }] }] } }));

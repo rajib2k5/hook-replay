@@ -139,13 +139,13 @@ export function parseCli(argv) {
   if (opts.out !== undefined && !opts.dryRun) checkWritable(path.resolve(opts.out));
   opts.loadWarnings = [];
   if (v.settings) {
-    const { hooks, warnings } = loadSettings(path.resolve(v.settings), { ignoreIf: !!v['ignore-if'], pluginRoot: opts.pluginRoot });
+    const { hooks, warnings } = loadSettings(path.resolve(v.settings), { ignoreIf: !!v['ignore-if'], pluginRoot: opts.pluginRoot, cwdMode: opts.cwdMode });
     opts.hooks = hooks;
     opts.loadWarnings = warnings;
   } else {
     const h = hookFromFlags({ hook: v.hook, event: v.event, matcher: v.matcher, hookTimeout: v['hook-timeout'], onFailure: v['on-failure'] });
     checkPluginRoot(h, opts.pluginRoot);
-    checkRelativeScript(h);
+    checkRelativeScript(h, { cwdMode: opts.cwdMode });
     opts.hooks = [h];
   }
   return opts;
