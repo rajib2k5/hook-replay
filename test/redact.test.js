@@ -283,3 +283,26 @@ const keeps6 = [
   'db:5432:app:u:https://example.com',
 ];
 for (const input of keeps6) test(`round 6 keep: ${JSON.stringify(input)}`, () => assert.equal(R(input), input));
+
+// Round-6 re-review: cf842d2 made a .pgpass field stop at any backslash and never match with // anywhere, so
+// db:5432:app:u:ab\cd left \cd, a password with // was not redacted, and an escaped colon (pa\:ss, as .pgpass writes
+// it) left \:ss. A field may now hold \ and \:, but never consumes the \ of a \" that ends a value inside a JSON
+// string, and only a field that starts with // (a URL after its scheme's ':') stops the match.
+const exact6b = [
+  ['.pgpass password with a backslash', String.raw`db:5432:app:u:ab\cdWd98`, 'db:5432:app:u:[REDACTED:value]'],
+  ['.pgpass password with //', 'db:5432:app:u:x//yWd97', 'db:5432:app:u:[REDACTED:value]'],
+  ['.pgpass password with an escaped colon', String.raw`db:5432:app:u:pa\:ssWd96`, 'db:5432:app:u:[REDACTED:value]'],
+  ['.pgpass user with an escaped colon', String.raw`db:5432:app:u\:v:Wd95x`, String.raw`db:5432:app:u\:v:[REDACTED:value]`],
+  ['.pgpass with a backslash, inside an escaped JSON string, keeps \\"', String.raw`"{\"c\":\"db:5432:app:u:ab\cdWd94\"}"`,
+    String.raw`"{\"c\":\"db:5432:app:u:[REDACTED:value]\"}"`],
+];
+for (const [name, input, want] of exact6b) test(`round 6b exact: ${name}`, () => assert.equal(R(input), want));
+
+const keeps6b = [
+  'host:3000',
+  'localhost:3000',
+  String.raw`a:1:b:c\d:e:f`,
+  String.raw`a:1:b:c:d\e:f`,
+  String.raw`"{\"u\":\"file:12:5:https://x\"}"`,
+];
+for (const input of keeps6b) test(`round 6b keep: ${JSON.stringify(input)}`, () => assert.equal(R(input), input));

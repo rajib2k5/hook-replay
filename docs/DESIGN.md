@@ -388,8 +388,9 @@ embed anything), and internal errors, which print a one-line redacted message (t
    second with `n` (`-nb user pw`) → `value`.
    6d3. `auth=("user", "pw")` (Python requests) → the second string, `value`.
    6d4. A `.pgpass` line: exactly five `:`-separated fields, the second digits or `*` → the last field, `value`.
-   Any such five-field string goes, also when it is not a `.pgpass` line, unless a field contains `//` (a URL:
-   `app.js:12:http://localhost:3000` stays). No field holds a backslash, so the `\` of a `\"` after the value stays.
+   Any such five-field string goes, also when it is not a `.pgpass` line, unless a field starts with `//` (the rest
+   of a URL: `app.js:12:http://localhost:3000` and `file:12:5:https://x` stay; a password `x//y` goes). A field may
+   hold `\` and `\:` (`.pgpass` escapes a `:` so), but never the `\` of a `\"`, so `\"` after the value stays.
    6e. `.netrc`: `machine <host>` or `default`, then any `login|account|port <x>` pairs, then `password <x>` →
    `value`; the separators may be whitespace or an escaped `\n`/`\t` inside a JSON string.
    6f. `name` or `key`, `:` or `=`, a secret name (rule 7's, or a name ending in `_PASS`, `_PWD` or `_KEY`, or

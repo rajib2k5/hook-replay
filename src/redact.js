@@ -51,7 +51,9 @@ const AUTH_SCHEMES = 'Bearer|Basic|Token|Negotiate|NTLM|ApiKey';
 // A YAML line break (also an escaped \n) and the rest of a line up to one.
 const YAML_NL = String.raw`(?:\n|\\n)`;
 const YAML_LINE = String.raw`(?:[^\n\\]|\\(?!n))*`;
-const PG_FIELD = String.raw`(?:(?!\/\/)[^\s:"'\\])+`;
+// A .pgpass field: an escaped colon (\:) or a backslash is part of it, except the \ of a \" that ends a value inside
+// a JSON string. A field that starts with // is the rest of a URL (https://x), so it never is one.
+const PG_FIELD = String.raw`(?!\/\/)(?:\\:|\\(?![":])|[^\s:"'\\])+`;
 const AUTH_PARAM_SCHEMES = String.raw`Digest|OAuth|Hawk|AWS4-HMAC-SHA256|SCRAM-SHA-\d+`;
 
 const RULES = [
@@ -94,9 +96,9 @@ const RULES = [
       : c === undefined ? m : pre + a + s1 + b + s2 + R('value')],
   // Python requests auth=("user", "password").
   [/(\bauth\s*=\s*\(\s*(?:"[^"]*"|'[^']*')\s*,\s*)("[^"]*"|'[^']*')/g, `$1${R('value')}`],
-  // A .pgpass line, host:port:database:user:password (port digits or *, exactly five fields): the last field. A field
-  // holds no backslash (the \ of a \" that ends the value stays) and no // (a URL: file:12:5:https://x keeps its port).
-  [new RegExp(String.raw`(?<![^\s"'=>])(${PG_FIELD}:(?:\d+|\*):${PG_FIELD}:${PG_FIELD}:)(${PG_FIELD})(?![^\s"'\\])`, 'g'), `$1${R('value')}`],
+  // A .pgpass line, host:port:database:user:password (port digits or *, exactly five fields): the last field. It ends
+  // at whitespace, a quote, a \" or the end (a URL after a location, file:12:5:https://x, is not one: see PG_FIELD).
+  [new RegExp(String.raw`(?<![^\s"'=>])(${PG_FIELD}:(?:\d+|\*):${PG_FIELD}:${PG_FIELD}:)(${PG_FIELD})(?![^\s"'\\]|\\(?!"))`, 'g'), `$1${R('value')}`],
   // .netrc: machine <h> | default, then login/account/port pairs, then password <value>.
   [new RegExp(String.raw`((?:\bmachine${SEP}\S+|\bdefault)(?:${SEP}(?:login|account|port)${SEP}\S+)*${SEP}password${SEP})(?!\[REDACTED:)((?:[^\s\\]|\\(?![nrt]))+)`, 'g'),
     `$1${R('value')}`],
