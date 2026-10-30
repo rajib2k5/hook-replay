@@ -10,8 +10,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { replay } from '../src/replay.js';
 import { hookFromFlags } from '../src/hooks.js';
-import { probe, wrapperArgv, chooseIsolation, seccompFilter, hostAddress, hookBinds, measureOverhead, IsolationError } from '../src/sandbox.js';
-import { program, encode } from '../src/seccomp.js';
+import { probe, wrapperArgv, chooseIsolation, seccompFilter, hostAddress, hostAddress6, hookBinds, measureOverhead, IsolationError } from '../src/sandbox.js';
+import { program, encode, ARCHES } from '../src/seccomp.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
@@ -157,6 +157,7 @@ test('(f) control: pgrep does see a setsid sleep started outside the sandbox', a
 });
 
 const skip = noBwrap;
+const hasPython = !spawnSync('python3', ['-c', '0']).error;
 
 test('probe passes under the real bwrap wrapper', { skip }, async (t) => {
   const r = await probe({ work: tmpDir(t) });
@@ -368,9 +369,83 @@ test('probe reason states what was measured', { skip }, async (t) => {
   assert.match(r.reason, /all connected unwrapped/);
 });
 
+// Round-4 review (pr3.mjs, v6.mjs): the probe accepted the real filter with --share-net, and a filter that denied
+// only AF_UNIX and AF_INET (with or without a network namespace); with the latter a hook reached the host over IPv6.
+// A filter for this host's arch that fails socket() with EACCES only for the listed address families.
+const partialFilter = (denied) => {
+  const a = ARCHES[process.arch];
+  const ins = (code, jt, jf, k) => ({ code, jt, jf, k: k >>> 0 });
+  const p = [ins(0x20, 0, 0, 4), ins(0x15, 1, 0, a.audit), ins(0x06, 0, 0, 0x80000000), ins(0x20, 0, 0, 0),
+    ins(0x15, 0, denied.length + 1, a.socket), ins(0x20, 0, 0, 16)]; // ld args[0] (domain, low word)
+  denied.forEach((d, i) => p.push(ins(0x15, denied.length - i, 0, d)));
+  p.push(ins(0x06, 0, 0, 0x7fff0000), ins(0x06, 0, 0, 0x0005000d));
+  return encode(p);
+};
+const AF = { UNIX: 1, INET: 2, INET6: 10, NETLINK: 16, PACKET: 17 };
+const realArgv = (work, argv) => wrapperArgv('bwrap', argv, { work });
+const shareNet = (work) => (argv) => { const a = realArgv(work, argv); a.splice(a.indexOf('--unshare-all') + 1, 0, '--share-net'); return a; };
+// Every namespace but pid; the host /proc stays (a new proc needs a new pid namespace).
+const sharePid = (work) => (argv) => {
+  const a = realArgv(work, argv);
+  a.splice(a.indexOf('--unshare-all'), 1, '--unshare-user', '--unshare-ipc', '--unshare-net', '--unshare-uts', '--unshare-cgroup-try');
+  a.splice(a.indexOf('--proc'), 2);
+  return a;
+};
+const fooled = [
+  ['the real filter with --share-net', (w) => ({ wrap: shareNet(w) }), /net namespace/],
+  ['the real filter without a pid namespace', (w) => ({ wrap: sharePid(w) }), /pid namespace/],
+  ['a filter denying only AF_UNIX and AF_INET, with a network namespace', () => ({ filter: partialFilter([AF.UNIX, AF.INET]) }), /tcp6 ::1/],
+  ['a filter denying only AF_UNIX and AF_INET, with --share-net', (w) => ({ wrap: shareNet(w), filter: partialFilter([AF.UNIX, AF.INET]) }), /tcp6 ::1 connected/],
+  ['a filter allowing only AF_INET6, with a network namespace', () => ({ filter: partialFilter([AF.UNIX, AF.INET, AF.NETLINK, AF.PACKET]) }), /tcp6 ::1 error ECONNREFUSED/],
+  ['a filter allowing only AF_NETLINK, with a network namespace', () => ({ filter: partialFilter([AF.UNIX, AF.INET, AF.INET6, AF.PACKET]) }), /netlink created/],
+];
+for (const [name, opts, why] of fooled) {
+  test(`probe rejects ${name}`, { skip }, async (t) => {
+    const work = tmpDir(t);
+    const r = await probe({ work, ...opts(work) });
+    assert.equal(r.ok, false, r.reason);
+    assert.match(r.reason, why);
+  });
+}
+
+test('probe rejects a filter allowing only AF_PACKET (checked with python3)', { skip: skip || (!hasPython && 'python3 is not installed') }, async (t) => {
+  const r = await probe({ work: tmpDir(t), filter: partialFilter([AF.UNIX, AF.INET, AF.INET6, AF.NETLINK]) });
+  assert.equal(r.ok, false, r.reason);
+  assert.match(r.reason, /not EACCES inside: packet (created|error EPERM)$/);
+});
+
+// A wrapper whose network namespace is real but whose "filter" is a stand-in that fails with EACCES only for
+// loopback, Unix and netlink (as an LSM rule on loopback might): only the host-address targets can tell.
+const LOOPBACK_ONLY = `const net=require('net'),os=require('os');const c=net.connect;
+const eacces=()=>{const s=new net.Socket();process.nextTick(()=>s.emit('error',Object.assign(new Error('EACCES'),{code:'EACCES'})));return s};
+net.connect=function(o){return o.path||o.host==='127.0.0.1'||o.host==='::1'?eacces():c.apply(this,arguments)};
+os.networkInterfaces=()=>{throw Object.assign(new Error('EACCES'),{code:'EACCES'})};`;
+test('probe rejects a sandbox that blocks only loopback: the host-address targets are needed', { skip: skip || (!hostAddress() && !hostAddress6() && 'no non-loopback address') }, async (t) => {
+  const work = tmpDir(t);
+  const shim = path.join(work, 'loopback-only.cjs');
+  fs.writeFileSync(shim, LOOPBACK_ONLY);
+  const wrap = (argv) => {
+    const a = realArgv(work, argv[0] === process.execPath ? [argv[0], '--require', shim, ...argv.slice(1)] : argv);
+    a.splice(a.indexOf('--seccomp'), 2);
+    return a;
+  };
+  const r = await probe({ work, wrap, python: null });
+  assert.equal(r.ok, false, r.reason);
+  assert.match(r.reason, /tcp6? host address error/);
+  assert.doesNotMatch(r.reason, /(unix|127\.0\.0\.1|::1|netlink) /, 'only the host targets were not EACCES');
+});
+
+test('probe passes and states each check: v6 targets, netlink and both namespaces', { skip }, async (t) => {
+  const r = await probe({ work: tmpDir(t) });
+  assert.equal(r.ok, true, r.reason);
+  assert.match(r.reason, /tcp6 ::1/);
+  if (hostAddress6()) assert.match(r.reason, /tcp6 host address/);
+  assert.match(r.reason, /netlink/);
+  assert.match(r.reason, /net and pid namespaces differ/);
+});
+
 // io_uring_setup is closed by the seccomp rule, not only by bytes: IORING_OP_SOCKET would make a socket without
 // socket(). The x32 and arch-kill rules are verified only by bytes on an aarch64 host (DESIGN.md §5).
-const hasPython = !spawnSync('python3', ['-c', '0']).error;
 const IO_URING = `python3 -c "import ctypes,os
 nr={'aarch64':425,'x86_64':425}[os.uname().machine]
 libc=ctypes.CDLL(None,use_errno=True)

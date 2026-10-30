@@ -57,36 +57,62 @@ export function hookBinds(argv, hidden = ['/tmp']) {
   return out;
 }
 
+const external = () => Object.values(os.networkInterfaces()).flat().filter(a => a && !a.internal);
 // First non-loopback host address (IPv4 preferred), or null.
 export function hostAddress() {
-  const all = Object.values(os.networkInterfaces()).flat().filter(a => a && !a.internal);
-  const v4 = all.find(a => a.family === 'IPv4' && !a.address.startsWith('169.254.'));
-  const v6 = all.find(a => a.family === 'IPv6' && !/^fe80:/i.test(a.address));
-  return (v4 || v6 || {}).address ?? null;
+  const v4 = external().find(a => a.family === 'IPv4' && !a.address.startsWith('169.254.'));
+  return (v4 ?? { address: hostAddress6() }).address ?? null;
 }
 
-// Runs inside the sandbox: try every target, print {name: "connected" | "error <code>" | "timeout"}, exit 0.
-const CLIENT = `const net=require('net');const ts=JSON.parse(process.argv[1]);const out={};let n=ts.length;
-const done=(k,v)=>{if(k in out)return;out[k]=v;if(--n===0){console.log(JSON.stringify(out));process.exit(0)}};
+// First global or ULA IPv6 host address (not link-local fe80::/10, not ::1), or null.
+export function hostAddress6() {
+  return external().find(a => a.family === 'IPv6' && !/^fe[89ab]/i.test(a.address) && a.address !== '::1')?.address ?? null;
+}
+
+// Runs inside the sandbox and prints one JSON object, then exits 0: for each target {name: "connected" |
+// "error <code>" | "timeout"}; "netlink": what os.networkInterfaces() got (getifaddrs opens an AF_NETLINK socket);
+// "ns net" / "ns pid": the readlink of /proc/self/ns/<x>, an inode that names the namespace.
+const CLIENT = `const net=require('net'),os=require('os'),fs=require('fs');const ts=JSON.parse(process.argv[1]);const out={};
+const code=e=>e.info&&typeof e.info.errno==='number'?(Math.abs(e.info.errno)===13?'EACCES':'errno '+Math.abs(e.info.errno)):e.code;
+try{os.networkInterfaces();out.netlink='created'}catch(e){out.netlink='error '+code(e)}
+for(const k of ['net','pid'])try{out['ns '+k]=fs.readlinkSync('/proc/self/ns/'+k)}catch(e){out['ns '+k]='error '+e.code}
+let n=ts.length;const fin=()=>{console.log(JSON.stringify(out));process.exit(0)};if(n===0)fin();
+const done=(k,v)=>{if(k in out)return;out[k]=v;if(--n===0)fin()};
 for(const t of ts){let s;try{s=net.connect(t.opts)}catch(e){done(t.name,'error '+e.code);continue}
 const tm=setTimeout(()=>{s.destroy();done(t.name,'timeout')},${PROBE_CONNECT_MS});
 s.on('connect',()=>{clearTimeout(tm);s.destroy();done(t.name,'connected')}).on('error',e=>{clearTimeout(tm);done(t.name,'error '+e.code)})}`;
 
+// Families Node cannot open: AF_PACKET and raw IPv4/IPv6 sockets, tried with python3 inside the sandbox. bwrap
+// drops capabilities, so past a filter that lets them through they fail with EPERM (measured here), not EACCES.
+const RAW_SOCKETS = ['packet', 'raw inet', 'raw inet6'];
+const RAW_CLIENT = `import socket, json, errno
+out = {}
+for name, args in {'packet': (17, 3, 0), 'raw inet': (2, 3, 1), 'raw inet6': (10, 3, 58)}.items():
+    try:
+        socket.socket(*args).close(); out[name] = 'created'
+    except OSError as e:
+        out[name] = 'error ' + errno.errorcode.get(e.errno, str(e.errno))
+print(json.dumps(out))`;
+
 const listenOn = (...args) => new Promise((resolve, reject) => {
-  const accepted = [];
-  const server = net.createServer((s) => { accepted.push(1); s.on('error', () => {}); s.destroy(); });
+  const server = net.createServer((s) => { s.on('error', () => {}); s.destroy(); });
   server.once('error', reject);
-  server.listen(...args, () => resolve({ server, accepted }));
+  server.listen(...args, () => resolve(server));
 });
 
-// Checks the real property, failing closed. Listeners: a Unix socket in tmp (which every wrapper mode binds into
-// the sandbox, so only seccomp can stop the connect), TCP on 127.0.0.1 and on a non-loopback host address.
-// (1) The wrapper must exit 0 for a trivial command. (2) Inside, every connect must fail with EACCES (what the
-// seccomp socket() rule returns): ENOENT or ECONNREFUSED would mean only a hidden path or an empty network
-// namespace, which a different socket defeats. (3) No listener may see a connection. (4) Positive control: the
-// same client run unwrapped must connect to every listener, so the listeners were reachable to begin with.
-// `wrap` builds the wrapped argv and `control` the unwrapped one (tests inject broken ones).
-export async function probe({ work, snap, writableFs = false, binary, filter = seccompFilter(), wrap, control = (argv) => argv } = {}) {
+const ownNs = (k) => { try { return fs.readlinkSync(`/proc/self/ns/${k}`); } catch { return null; } };
+
+// Checks the real property, failing closed. (1) The wrapper must exit 0 for a trivial command. (2) Inside, socket()
+// must fail with EACCES (what the seccomp rule returns) for every family: connects to a Unix socket in `work`
+// (bound into the sandbox in every mode, so only seccomp can stop it), TCP to 127.0.0.1 and ::1, TCP to the
+// first non-loopback IPv4 and the first global/ULA IPv6 host address (if any); AF_NETLINK (os.networkInterfaces);
+// and with python3 on PATH, AF_PACKET and raw IPv4/IPv6. ENOENT, ECONNREFUSED or ENETUNREACH would only show a
+// hidden path or an empty network namespace, which another family or a later bind defeats. (3) The readlink of
+// /proc/self/ns/net and /proc/self/ns/pid inside must differ from hook-replay's own. (4) Positive control: the
+// same client run unwrapped must connect to every target it has a listener for (::1 has none when the host has no
+// IPv6 loopback; inside it must still be EACCES). `wrap` builds the wrapped argv, `control` the unwrapped one,
+// `python` the python3 path or null (tests inject them).
+export async function probe({ work, snap, writableFs = false, binary, filter = seccompFilter(), wrap, control = (argv) => argv, python = which('python3') } = {}) {
   const w = wrap ?? ((argv) => wrapperArgv('bwrap', argv, { writableFs, work, snap, binary }));
   const extraInput = filter ? [filter] : [];
   const run = (argv, input = extraInput) => runHook({ argv, stdin: '', env: { PATH: process.env.PATH }, cwd: work, timeoutMs: 10000,
@@ -94,33 +120,56 @@ export async function probe({ work, snap, writableFs = false, binary, filter = s
   const trivial = await run(w(['true']));
   if (trivial.spawnError) return { ok: false, reason: `bwrap: ${trivial.spawnError}` };
   if (trivial.exitCode !== 0) return { ok: false, reason: `bwrap: exit ${trivial.exitCode ?? trivial.signal} for a trivial command: ${trivial.stderr.trim().slice(0, 200)}` };
-  const listeners = [];
+  const servers = [];
   try {
     const sock = path.join(work, `probe-${process.pid}.sock`);
     const targets = [];
-    const add = async (name, args, opts) => { listeners.push({ name, ...(await listenOn(...args)) }); targets.push({ name, opts: opts(listeners.at(-1).server) }); };
+    // A target with no listener (listen failed) is still tried inside, where it must be EACCES; it has no control.
+    const add = async (name, args, opts) => {
+      let server = null;
+      try { server = await listenOn(...args); servers.push(server); } catch { /* no listener */ }
+      targets.push({ name, opts: opts(server), control: !!server });
+    };
     await add('unix', [sock], () => ({ path: sock }));
-    await add('tcp 127.0.0.1', [0, '127.0.0.1'], (s) => ({ port: s.address().port, host: '127.0.0.1' }));
-    const host = hostAddress();
-    if (host) await add('tcp host address', [0, host], (s) => ({ port: s.address().port, host }));
-    const client = [process.execPath, '-e', CLIENT, JSON.stringify(targets)];
+    await add('tcp 127.0.0.1', [0, '127.0.0.1'], (sv) => ({ port: sv?.address().port ?? 9, host: '127.0.0.1' }));
+    await add('tcp6 ::1', [0, '::1'], (sv) => ({ port: sv?.address().port ?? 9, host: '::1' }));
+    const host4 = hostAddress();
+    const host6 = hostAddress6();
+    if (host4 && host4 !== host6) await add('tcp host address', [0, host4], (sv) => ({ port: sv?.address().port ?? 9, host: host4 }));
+    if (host6) await add('tcp6 host address', [0, host6], (sv) => ({ port: sv?.address().port ?? 9, host: host6 }));
+    const client = [process.execPath, '-e', CLIENT, JSON.stringify(targets.map(({ name, opts }) => ({ name, opts })))];
     const parse = (r) => { try { return JSON.parse(r.stdout); } catch { return null; } };
     const r = await run(w(client));
     if (r.spawnError) return { ok: false, reason: `bwrap: ${r.spawnError}` };
     if (r.exitCode !== 0) return { ok: false, reason: `bwrap: probe exit ${r.exitCode ?? r.signal}: ${r.stderr.trim().slice(0, 200)}` };
     const got = parse(r);
     if (!got) return { ok: false, reason: 'bwrap: probe printed no result' };
-    const bad = targets.filter(t => got[t.name] !== 'error EACCES');
-    if (bad.length) return { ok: false, reason: `bwrap: not EACCES inside: ${bad.map(t => `${t.name} ${got[t.name] ?? 'missing'}`).join(', ')}` };
-    const reached = listeners.filter(l => l.accepted.length > 0);
-    if (reached.length) return { ok: false, reason: `bwrap: listener reached: ${reached.map(l => l.name).join(', ')}` };
+    const checked = [...targets.map(t => t.name), 'netlink'];
+    if (python) {
+      const raw = await run(w([python, '-c', RAW_CLIENT]));
+      const g = raw.exitCode === 0 ? parse(raw) : null;
+      if (!g) return { ok: false, reason: `bwrap: raw-socket probe failed: exit ${raw.exitCode ?? raw.signal ?? raw.spawnError}: ${raw.stderr.trim().slice(0, 200)}` };
+      Object.assign(got, Object.fromEntries(RAW_SOCKETS.map(k => [k, g[k]])));
+      checked.push(...RAW_SOCKETS);
+    }
+    const bad = checked.filter(k => got[k] !== 'error EACCES');
+    if (bad.length) return { ok: false, reason: `bwrap: not EACCES inside: ${bad.map(k => `${k} ${got[k] ?? 'missing'}`).join(', ')}` };
+    for (const k of ['net', 'pid']) {
+      const mine = ownNs(k);
+      const inside = got[`ns ${k}`];
+      if (!mine || typeof inside !== 'string' || !/^\w+:\[\d+\]$/.test(inside) || inside === mine) {
+        return { ok: false, reason: `bwrap: no own ${k} namespace: /proc/self/ns/${k} is ${inside ?? 'missing'} inside, ${mine ?? 'unreadable'} in hook-replay` };
+      }
+    }
     const c = parse(await run(control(client), []));
-    const unreached = targets.filter(t => !c || c[t.name] !== 'connected');
+    const unreached = targets.filter(t => t.control && (!c || c[t.name] !== 'connected'));
     if (unreached.length) return { ok: false, reason: `bwrap: probe control failed, unwrapped client did not connect: ${unreached.map(t => `${t.name} ${c?.[t.name] ?? 'missing'}`).join(', ')}` };
-    const names = targets.map(t => t.name).join(', ');
-    return { ok: true, reason: `bwrap+seccomp: socket() EACCES inside for ${names}; all connected unwrapped` };
+    const noListener = targets.filter(t => !t.control).map(t => t.name);
+    return { ok: true, reason: `bwrap+seccomp: socket() EACCES inside for ${checked.join(', ')}; net and pid namespaces differ from hook-replay's; ` +
+      `all connected unwrapped${noListener.length ? ` (no listener, so no control, for ${noListener.join(', ')})` : ''}` +
+      `${python ? '' : '; AF_PACKET and raw sockets not checked (no python3)'}` };
   } finally {
-    for (const l of listeners) l.server.close();
+    for (const sv of servers) sv.close();
   }
 }
 
