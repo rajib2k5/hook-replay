@@ -243,3 +243,43 @@ for (const [name, input, want] of exact5) test(`round 5 exact: ${name}`, () => a
 test('round 5 limit (documented): "password hunter2" in prose is not redacted', () => {
   assert.equal(R('blocked: command contains password r5Prose5523'), 'blocked: command contains password r5Prose5523');
 });
+
+// Round-6 review (red2.mjs): --pw=X leaked (only --pw X was caught). The value must be gone.
+const leaks6 = [
+  ['--pw=x', 'mysql --pw=r6PwEq6601 -u root', 'r6PwEq6601'],
+  ['--pw="x y"', 'tool --pw="r6PwQ 6602" next', 'r6PwQ 6602'],
+  ['--api-key=x', 'tool --api-key=r6ApiEq6603 next', 'r6ApiEq6603'],
+];
+for (const [name, input, values] of leaks6) {
+  test(`round 6 leak: ${name}`, () => {
+    const out = R(input);
+    for (const v of values.split('|')) assert.ok(!out.includes(v), `${v} survives in ${out}`);
+    assert.match(out, /\[REDACTED:/);
+  });
+}
+
+// Round-6 review: the .pgpass rule redacted the port of a URL in a file:line:col location and ate the backslash of
+// \" after a value inside a JSON string. A field with // (a URL) never matches; a backslash is never consumed.
+const exact6 = [
+  ['--pw=x', 'mysql --pw=r6PwEq6604 -u root', 'mysql --pw=[REDACTED:value] -u root'],
+  ['--password=x is redacted once', 'mysql --password=r6PwEq6605 -u x', 'mysql --password=[REDACTED:value] -u x'],
+  ['--pw x still', 'tool --pw r6Pw6606 x', 'tool --pw [REDACTED:value] x'],
+  ['.pgpass inside an escaped JSON string keeps \\"', String.raw`"{\"c\":\"db:5432:app:alice:r6Pg6607\"}"`,
+    String.raw`"{\"c\":\"db:5432:app:alice:[REDACTED:value]\"}"`],
+  ['.pgpass in an escaped quote in a command', String.raw`{"command":"echo \"db:5432:app:alice:r6Pg6608\" > ~/.pgpass"}`,
+    String.raw`{"command":"echo \"db:5432:app:alice:[REDACTED:value]\" > ~/.pgpass"}`],
+  ['--pw=x at the end of a JSON string keeps "}', String.raw`{"c":"mysql --pw=r6Pw6610"}`, String.raw`{"c":"mysql --pw=[REDACTED:value]"}`],
+  ['--pw x at the end of a JSON string keeps "}', String.raw`{"c":"mysql --pw r6Pw6611"}`, String.raw`{"c":"mysql --pw [REDACTED:value]"}`],
+  ['--pw=x at the end of an escaped string keeps \\"}', String.raw`"{\"c\":\"t --pw=r6Pw6612\"}"`, String.raw`"{\"c\":\"t --pw=[REDACTED:value]\"}"`],
+  ['.pgpass with a socket-dir host', '/var/run/postgresql:5432:app:u:r6Pg6609', '/var/run/postgresql:5432:app:u:[REDACTED:value]'],
+];
+for (const [name, input, want] of exact6) test(`round 6 exact: ${name}`, () => assert.equal(R(input), want));
+
+const keeps6 = [
+  'src/a.js:12:5:https://example.com',
+  'file:line:col:https://example.com',
+  'app.js:12:http://localhost:3000',
+  'at f (app.js:12:http://localhost:3000)',
+  'db:5432:app:u:https://example.com',
+];
+for (const input of keeps6) test(`round 6 keep: ${JSON.stringify(input)}`, () => assert.equal(R(input), input));

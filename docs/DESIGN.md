@@ -378,7 +378,8 @@ embed anything), and internal errors, which print a one-line redacted message (t
    second with `n` (`-nb user pw`) → `value`.
    6d3. `auth=("user", "pw")` (Python requests) → the second string, `value`.
    6d4. A `.pgpass` line: exactly five `:`-separated fields, the second digits or `*` → the last field, `value`.
-   Any such five-field string goes, also when it is not a `.pgpass` line.
+   Any such five-field string goes, also when it is not a `.pgpass` line, unless a field contains `//` (a URL:
+   `app.js:12:http://localhost:3000` stays). No field holds a backslash, so the `\` of a `\"` after the value stays.
    6e. `.netrc`: `machine <host>` or `default`, then any `login|account|port <x>` pairs, then `password <x>` →
    `value`; the separators may be whitespace or an escaped `\n`/`\t` inside a JSON string.
    6f. `name` or `key`, `:` or `=`, a secret name (rule 7's, or a name ending in `_PASS`, `_PWD` or `_KEY`, or
@@ -403,9 +404,10 @@ embed anything), and internal errors, which print a one-line redacted message (t
    secret word (`SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|KEY|PASS|PWD|AUTHORIZATION|COOKIE`): so
    `max_tokens: 4096`, `tokenCount: 12`, `PASSWORD_MIN_LENGTH=8` and `TOKENIZERS_PARALLELISM=false` stay, and
    `PASSWORD=1234` and `api_key: 1234` go.
-   7a. CLI flags with a space before the value: `--[x-]password|passwd|pass|pw|token|secret|api-key|access-key|
-   private-key[-x] <value>` (the value may not start with `-`) → `value`; a flag ending in `-stdin`, `-file`,
-   `-env`, `-cmd`, `-command` or `-prompt` takes no secret and is left. `--password=X` is rule 7.
+   7a. CLI flags with a space or `=` before the value: `--[x-]password|passwd|pass|pw|token|secret|api-key|access-key|
+   private-key[-x] <value>` or `...=<value>` (the value may not start with `-`; a bare value ends before a closing
+   quote, as in rule 7) → `value`; a flag ending in `-stdin`, `-file`,
+   `-env`, `-cmd`, `-command` or `-prompt` takes no secret and is left. `--password=X` is already rule 7 and is not redacted twice.
    7b. mysql/mariadb family only (`mysql`, `mysqldump`, `mariadb-dump`, ...): `-p` directly followed by ≥ 4
    non-space characters later in the same command → `-p[REDACTED:value]`. Other commands' `-p` (often a port)
    are left alone.

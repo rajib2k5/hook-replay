@@ -51,6 +51,7 @@ const AUTH_SCHEMES = 'Bearer|Basic|Token|Negotiate|NTLM|ApiKey';
 // A YAML line break (also an escaped \n) and the rest of a line up to one.
 const YAML_NL = String.raw`(?:\n|\\n)`;
 const YAML_LINE = String.raw`(?:[^\n\\]|\\(?!n))*`;
+const PG_FIELD = String.raw`(?:(?!\/\/)[^\s:"'\\])+`;
 const AUTH_PARAM_SCHEMES = String.raw`Digest|OAuth|Hawk|AWS4-HMAC-SHA256|SCRAM-SHA-\d+`;
 
 const RULES = [
@@ -93,8 +94,9 @@ const RULES = [
       : c === undefined ? m : pre + a + s1 + b + s2 + R('value')],
   // Python requests auth=("user", "password").
   [/(\bauth\s*=\s*\(\s*(?:"[^"]*"|'[^']*')\s*,\s*)("[^"]*"|'[^']*')/g, `$1${R('value')}`],
-  // A .pgpass line, host:port:database:user:password (port digits or *, exactly five fields): the last field.
-  [/(?<![^\s"'=>])((?:[^\s:"']+):(?:\d+|\*):(?:[^\s:"']+):(?:[^\s:"']+):)([^\s:"']+)(?![^\s"'])/g, `$1${R('value')}`],
+  // A .pgpass line, host:port:database:user:password (port digits or *, exactly five fields): the last field. A field
+  // holds no backslash (the \ of a \" that ends the value stays) and no // (a URL: file:12:5:https://x keeps its port).
+  [new RegExp(String.raw`(?<![^\s"'=>])(${PG_FIELD}:(?:\d+|\*):${PG_FIELD}:${PG_FIELD}:)(${PG_FIELD})(?![^\s"'\\])`, 'g'), `$1${R('value')}`],
   // .netrc: machine <h> | default, then login/account/port pairs, then password <value>.
   [new RegExp(String.raw`((?:\bmachine${SEP}\S+|\bdefault)(?:${SEP}(?:login|account|port)${SEP}\S+)*${SEP}password${SEP})(?!\[REDACTED:)((?:[^\s\\]|\\(?![nrt]))+)`, 'g'),
     `$1${R('value')}`],
@@ -117,8 +119,9 @@ const RULES = [
   [new RegExp(String.raw`\b(pwd)(\\?["']?)\s*[=:]\s*(?!\\?["']?[/~$.])${VALUE}`, 'gi'), (m, name, _q, value) => keepOr(m, name, value)],
   // Upper-case environment names that are or end in _KEY (OPENAI_KEY=, KEY=); lower case (sort_key=) is left.
   [new RegExp(String.raw`\b(${ENV_KEY})(\\?["']?)\s*[=:]\s*${VALUE}`, 'g'), (m, name, _q, value) => keepOr(m, name, value)],
-  // CLI flags with a space before the value (--password=X is the rule above). The value may not look like a flag.
-  [new RegExp(String.raw`(${SECRET_FLAG})(\s+)("[^"]*"|'[^']*'|[^\s-]\S*)`, 'gi'), `$1$2${R('value')}`],
+  // CLI flags, the value after a space or '=' (--pw=X; --password=X is already a key=value above, and a value that is
+  // an earlier rule's marker is left). The value may not look like a flag; a bare one ends before a closing quote.
+  [new RegExp(String.raw`(${SECRET_FLAG})(\s+|=)(?!\[REDACTED:)("[^"]*"|'[^']*'|(?!-)${WORD})`, 'gi'), `$1$2${R('value')}`],
   // mysql/mariadb family only: -p directly followed by >= 4 non-space characters is the password.
   [/(\b(?:mysql|mariadb)[\w-]*\s(?:[^\n|;&]*?\s)?)-p(\S{4,})/g, `$1-p${R('value')}`],
   // Hex (>= 32) is redacted only after a key-like name or an X- header: bare git SHAs must survive.
