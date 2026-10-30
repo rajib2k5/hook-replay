@@ -115,6 +115,14 @@ export async function replay(opts) {
     throw e;
   }
   const total = Object.values(s.perHook).reduce((a, h) => a + h.points, 0);
+  // A hook that can write outside work/ (--writable-fs, or unwrapped under --allow-network) can swap the directories
+  // above snap/ and back while other hooks run, and so feed them fake transcripts between their checks (round-6,
+  // swap.cjs). One run at a time means such a hook can only fool its own run.
+  const effective = writableFs || allowNetwork ? 1 : concurrency;
+  const forced = effective < concurrency
+    ? `--concurrency ${concurrency} lowered to 1: with ${allowNetwork ? '--allow-network' : '--writable-fs'} a hook can write outside its work dir, so hooks run one at a time`
+    : null;
+  if (forced) stderr.write(`hook-replay: note: ${forced}\n`);
   for (const h of hooks) {
     stderr.write(`hook-replay: ${h.id} ${escapeControl(redact(h.args ? [h.command, ...h.args].join(' ') : h.command))}\n  ${s.perHook[h.id].points} points, isolation ${isolation.network}, cwd ${cwdMode}\n` +
       `  replay EXECUTES this hook ${s.perHook[h.id].points} times; a hook with side effects will perform them ${s.perHook[h.id].points} times\n`);
@@ -128,7 +136,7 @@ export async function replay(opts) {
   const onTamper = (kind) => { tampered[kind]++; };
   try {
     const jobs = files.map((f, n) => ({ f, n })).filter(({ f }) => s.selected.has(f.relPath));
-    await pool(jobs, concurrency, async ({ f, n }) => {
+    await pool(jobs, effective, async ({ f, n }) => {
       const sel = s.selected.get(f.relPath);
       // A source that is no longer a readable regular file (a hook replaced it, a FIFO say) is counted and skipped:
       // both opens below fail before any point of it runs.
@@ -183,5 +191,6 @@ export async function replay(opts) {
   results.sort((a, b) => Buffer.compare(Buffer.from(a.file), Buffer.from(b.file)) || a.lineNo - b.lineNo ||
     hookOrder[a.hookId] - hookOrder[b.hookId] || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   const warnings = Object.entries(tampered).filter(([, n]) => n > 0).map(([k, n]) => TAMPER[k](n));
-  return { results, corpus: s.corpus, perHook: s.perHook, isolation, sandboxOverheadMs, tmpDir: tmp, total, files, warnings };
+  if (forced) warnings.push(forced);
+  return { concurrency: effective, results, corpus: s.corpus, perHook: s.perHook, isolation, sandboxOverheadMs, tmpDir: tmp, total, files, warnings };
 }

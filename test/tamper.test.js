@@ -154,3 +154,81 @@ for (const [mode, extra, skip] of [['--writable-fs', ['--writable-fs'], noBwrap]
     assert.deepEqual(fs.readdirSync(`${tmpdir}.old`), [], 'the renamed <root> stayed after exit');
   });
 }
+
+// Round-6 review (swap.cjs): at --concurrency 8 under --writable-fs or --allow-network one hook renamed the directory
+// above <root>, put fake transcripts at the old path while other hooks ran, and renamed it back before the check after
+// its own run. The other runs' checks fell inside the swap window on both sides, so their verdicts came from the fake
+// data: exit 0, 7 fake blocks. In those modes hook-replay now runs one hook at a time, so a swap can only fool the
+// run that made it, and the check after that run sees it or the original dir.
+const SWAP = `const fs=require('fs'),path=require('path');let d='';
+const sleep=ms=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,ms);
+process.stdin.on('data',c=>d+=c).on('end',()=>{
+const tp=JSON.parse(d).transcript_path,[lock]=process.argv.slice(2),R=path.dirname(path.dirname(tp)),A=path.dirname(R);
+let holder=false;try{fs.mkdirSync(lock);holder=true}catch{}
+if(holder){fs.renameSync(A,A+'.old');fs.mkdirSync(path.join(R,'snap'),{recursive:true});
+for(const w of ['cwd','tmp','plugin-data'])fs.mkdirSync(path.join(R,'work',w),{recursive:true});
+for(let n=0;n<8;n++)fs.writeFileSync(path.join(R,'snap','t-'+n+'.jsonl'),'{"FAKE":1}\\n');
+sleep(800);fs.rmSync(A,{recursive:true,force:true});fs.renameSync(A+'.old',A);process.exit(0)}
+sleep(300);let fake=false;try{fake=fs.readFileSync(tp,'utf8').includes('FAKE')}catch{}
+if(fake)fs.appendFileSync(lock+'.fake-reads','x');
+sleep(900);if(fake){process.stderr.write('blocked by fake');process.exit(2)}process.exit(0)})`;
+
+const FORCED = /--concurrency 8 lowered to 1/;
+
+for (const [mode, extra, skip] of [['--writable-fs', ['--writable-fs'], noBwrap], ['--allow-network (unwrapped)', ['--allow-network'], false]]) {
+  test(`${mode}, concurrency 8: a hook that swaps the directory above <root> and back yields no verdict from fake data`, { skip }, (t) => {
+    const d = tmpDir(t);
+    const [proj, tmpdir, lock] = [path.join(d, 'projects'), path.join(d, 'tmpdir'), path.join(d, 'lock')];
+    makeProjects(proj, 8);
+    fs.mkdirSync(tmpdir);
+    const script = path.join(d, 'swap.cjs');
+    fs.writeFileSync(script, SWAP);
+    const r = spawnSync(process.execPath, [path.join(root, 'bin/hook-replay.js'), '--projects-dir', proj, '--hook', `node ${script} ${lock}`,
+      '--event', 'PreToolUse', '--json', '--concurrency', '8', ...extra], { encoding: 'utf8', cwd: root, env: { ...process.env, TMPDIR: tmpdir } });
+    assert.ok(fs.existsSync(lock), 'the hook never swapped the directory');
+    assert.equal(fs.existsSync(`${lock}.fake-reads`), false, 'a hook run was given a fake transcript');
+    assert.doesNotMatch(r.stderr, /internal error/);
+    if (r.status === 1) return;
+    assert.equal(r.status, 0, r.stdout + r.stderr);
+    const m = JSON.parse(r.stdout);
+    assert.equal(m.hooks[0].runs, 16);
+    assert.equal(m.hooks[0].counts.block ?? 0, 0, JSON.stringify(m.hooks[0].counts));
+  });
+
+  test(`${mode}: --concurrency 8 runs at 1, with a notice, a warning and config.concurrency 1`, { skip }, (t) => {
+    const d = tmpDir(t);
+    const proj = path.join(d, 'projects');
+    makeProjects(proj, 2);
+    const r = spawnSync(process.execPath, [path.join(root, 'bin/hook-replay.js'), '--projects-dir', proj, '--hook', 'true',
+      '--event', 'PreToolUse', '--json', '--concurrency', '8', ...extra], { encoding: 'utf8', cwd: root });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr.split('\n').filter(l => FORCED.test(l)).length, 1, r.stderr);
+    const m = JSON.parse(r.stdout);
+    assert.equal(m.config.concurrency, 1);
+    assert.ok(m.warnings.some(w => FORCED.test(w)), m.warnings.join('\n'));
+  });
+}
+
+test('default sandbox: --concurrency 8 is kept, with no notice', { skip: noBwrap }, (t) => {
+  const d = tmpDir(t);
+  const proj = path.join(d, 'projects');
+  makeProjects(proj, 2);
+  const r = spawnSync(process.execPath, [path.join(root, 'bin/hook-replay.js'), '--projects-dir', proj, '--hook', 'true',
+    '--event', 'PreToolUse', '--json', '--concurrency', '8'], { encoding: 'utf8', cwd: root });
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, FORCED);
+  const m = JSON.parse(r.stdout);
+  assert.equal(m.config.concurrency, 8);
+  assert.ok(!m.warnings.some(w => FORCED.test(w)), m.warnings.join('\n'));
+});
+
+test('--allow-network with --concurrency 1 prints no notice', (t) => {
+  const d = tmpDir(t);
+  const proj = path.join(d, 'projects');
+  makeProjects(proj, 2);
+  const r = spawnSync(process.execPath, [path.join(root, 'bin/hook-replay.js'), '--projects-dir', proj, '--hook', 'true',
+    '--event', 'PreToolUse', '--json', '--concurrency', '1', '--allow-network'], { encoding: 'utf8', cwd: root });
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /lowered to 1/);
+  assert.ok(!JSON.parse(r.stdout).warnings.some(w => /lowered to 1/.test(w)));
+});

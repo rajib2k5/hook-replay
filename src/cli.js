@@ -213,7 +213,7 @@ async function run(argv, io, setRedactor) {
   const model = buildReport({
     res, hooks: opts.hooks, samples: opts.samples, warnings, version: VERSION, redacted: !opts.showRaw,
     redact: red,
-    config: { timeout_s: opts.timeoutS, concurrency: opts.concurrency, cwd_mode: opts.cwdMode, project_dir: opts.projectDir,
+    config: { timeout_s: opts.timeoutS, concurrency: res.concurrency, cwd_mode: opts.cwdMode, project_dir: opts.projectDir,
       filters: opts.filters.raw, sample: opts.filters.sample, limit: opts.limit },
   });
   const text = opts.json || opts.out ? renderJson(model) : renderHuman(model);
