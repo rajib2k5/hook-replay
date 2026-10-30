@@ -183,7 +183,46 @@ The classification rules are not yet compared with a real Claude Code run (ADR-0
 
 ## Dogfood: staff-kit hooks
 
-<!-- DOGFOOD-RESULTS -->
+The owner ran the two hooks from
+[claude-staff-kit](https://github.com/rajib2k5/claude-staff-kit) against their own local transcripts on
+2026-10-30. The transcripts stay on that machine. This section gives only counts and categories. It gives no
+command text.
+
+The corpus had about 1,190 transcript files from 44 sessions (subagent files included).
+
+**`evolv-destructive-guard.js` (PreToolUse, all tools)**
+
+| Runs | pass | ask | block | error | timeout | p50 | p95 | max |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 67,673 | 67,448 | 218 | 7 | 0 | 0 | 50.9 ms | 132 ms | 352 ms |
+
+- 215 of the 218 asks and all 7 blocks were on `Bash`. The other asks were 1 on `Write` and 2 on `Edit`.
+- In 219 of the 225 flagged calls, the real session ran the call and it succeeded. Each of these is a candidate
+  false positive.
+- The 5 sampled blocks were not destructive. They matched on text in the command:
+  - An install script that `curl` downloaded matched "filesystem format / raw device write".
+  - Text in a `printf` matched "terraform destroy".
+  - Deletes inside Claude's own `/tmp/claude-*` scratchpad matched "delete of /tmp (the filesystem root)",
+    although the guard's own rules exempt that scratchpad.
+- That full run used the old writable-filesystem default, with 4 hooks in parallel on a machine that was also
+  running test suites. A second run, on a 10% sample (`--sample 0.1`) with the current read-only default, gave
+  6,842 runs: 24 ask, 1 block, 0 errors, p50 42 ms, p95 64 ms. All latencies include the sandbox. The
+  sandbox added about 10 ms per run at p50 (wrapped `true` 13.6 ms, unwrapped 4.2 ms).
+
+**`evolv-skills-enforcer.js` (Stop)**
+
+| Runs | pass | block | p50 | p95 | max |
+|---:|---:|---:|---:|---:|---:|
+| 1,912 | 1,822 | 90 | 41 ms | 59 ms | 107 ms |
+
+- All 90 flags are `additionalContext`. On Stop, that keeps Claude working, so hook-replay counts them as
+  `block`. After 36 of the 90, the real session stopped and waited for the user.
+- The sampled flags were turns that gave a claim and its evidence in the same message (for example a test
+  count). The hook's evidence pattern did not match that text.
+- **The motivating bug:** we also replayed a copy of the hook with its `stripOwnBlocks` fix removed. That copy
+  flagged 90 of 1,897 Stop points. The fixed hook flagged 90 of 1,896 in the same run.
+  Only 6 of the transcripts contain the hook's injected policy block. This shows a known limit of replay (see Fidelity limits): if a session was recorded
+  without the hook, the hook's own injected text is not in it.
 
 ## Development
 
