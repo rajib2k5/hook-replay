@@ -116,8 +116,9 @@ const MODES = { table: [], json: ['--json'], out: ['--out', null], 'dry-run': ['
 for (const [mode, flags] of Object.entries(MODES)) {
   test(`(d) ${mode}: nothing planted reaches stdout, stderr or the --out file; --show-raw shows it`, (t) => {
     const d = setupGaps(t);
-    // A settings warning names the settings path (under the real home) and the hook command is in the banner.
-    const sdir = fs.mkdtempSync(path.join(root, '.hook-replay-redact-'));
+    // A settings warning names the settings path (under the real home, wherever the repo lives) and the hook
+    // command is in the banner.
+    const sdir = fs.mkdtempSync(path.join(os.homedir(), '.hook-replay-redact-'));
     t.after(() => fs.rmSync(sdir, { recursive: true, force: true }));
     const settings = path.join(sdir, 'settings.json');
     fs.writeFileSync(settings, JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'true' }] }],
@@ -140,7 +141,7 @@ for (const [mode, flags] of Object.entries(MODES)) {
 }
 
 test('usage and load errors print redacted paths', (t) => {
-  const missing = path.join(root, '.hook-replay-missing', 'cliMissingKey7019', 'settings.json');
+  const missing = path.join(os.homedir(), '.hook-replay-missing', 'cliMissingKey7019', 'settings.json');
   const r = spawnSync(process.execPath, [path.join(root, 'bin/hook-replay.js'), '--settings', missing], { encoding: 'utf8', cwd: root });
   assert.equal(r.status, 2);
   assert.match(r.stderr, /cannot load ~\//);
