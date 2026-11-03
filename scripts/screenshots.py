@@ -7,6 +7,7 @@ text for private strings and fails if it finds one.
 
 Usage: python3 scripts/screenshots.py      (needs python3, `rich`, node 20+)
 """
+import getpass
 import html
 import io
 import os
@@ -135,7 +136,7 @@ def render(shot):
 
 
 FORBIDDEN = [
-    ("rajib", re.compile(r"rajib", re.I)),
+    ("the real username", re.compile(re.escape(getpass.getuser()), re.I)),
     ("/home/ not alice or fixture", re.compile(r"/home/(?!alice\b|fixture\b)")),
     ("@ not example.com", re.compile(r"@(?!example\.com\b)[A-Za-z0-9]")),
     ("ghp_", re.compile(r"ghp_")),
