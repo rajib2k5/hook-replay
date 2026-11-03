@@ -4,6 +4,8 @@ hook-replay runs a Claude Code hook against the real tool calls in your past ses
 
 Version: 0.1. Hooks reference: <https://code.claude.com/docs/en/hooks>.
 
+![The hook-replay table for a PreToolUse hook on the fixture sessions: 23 runs, 3 block, 1 ask, 2 allow, with p50, p95 and max latency](docs/images/02-table.svg)
+
 ## Quick start
 
 Requirements:
@@ -63,6 +65,40 @@ flagged and the real call succeeded: 3
 ```
 
 The numbers in the table change from run to run. Latency depends on your machine.
+
+## How to use
+
+The images below are real runs on the synthetic fixture sessions in `test/fixtures/projects`. `scripts/screenshots.py` makes them again.
+
+1. Do a dry run first. It shows how many tool calls the hook will see. It runs nothing.
+
+   ![Help text, then a dry run that counts 23 Bash calls in 5 fixture sessions](docs/images/01-dry-run.svg)
+
+   *A dry run counts the calls that match. Nothing is executed.*
+
+2. Replay the hook. The table shows what it would do on each call.
+
+   ![The result table: 23 runs, 3 block, 1 ask, 2 allow, 0 errors, with latency columns](docs/images/02-table.svg)
+
+   *Each column counts one outcome. BLOCK, ASK, WARN, STOP and DEFER are the flagged outcomes.*
+
+3. Read the samples. Each flagged sample tells you whether the real session ran that call and whether it succeeded. Secrets are redacted.
+
+   ![Three samples from a hook that asks on every Bash call; tokens show as REDACTED](docs/images/03-samples.svg)
+
+   *When the real session ran the call and it succeeded, the flag is a candidate false positive.*
+
+4. Check the latency and the sandbox. The header shows the isolation and the cost of the sandbox.
+
+   ![The report header with bwrap isolation and sandbox cost, then the table with p50, p95 and max](docs/images/04-latency.svg)
+
+   *The latency includes the sandbox. The header gives the cost of the sandbox by itself.*
+
+5. Replay all hooks of a settings file in one run.
+
+   ![A settings file with three hooks, and one table row per hook](docs/images/05-settings.svg)
+
+   *`--settings` reads PreToolUse, PostToolUse and Stop hooks, with their matchers.*
 
 ## How it works
 
